@@ -1,0 +1,2235 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EI GHOL GYM</title>
+  <!-- ELGHOL GYM v5 — Supabase Auth integrated -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0d; color: #e8e8f0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #cc1f1f; border-radius: 3px; }
+    input, select, textarea { outline: none; }
+    .fade { animation: fd .3s ease; }
+    @keyframes fd { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    @keyframes glow { 0%, 100% { filter: drop-shadow(0 0 8px #cc1f1f55); } 50% { filter: drop-shadow(0 0 22px #cc1f1f99); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+// ── Supabase ──────────────────────────────────────────────────────────────────
+const SUPA_URL = "https://zdlucwpkzfktmkwklkgi.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpkbHVjd3BremZrdG1rd2tsa2dpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA4NjEwOTgsImV4cCI6MjA5NjQzNzA5OH0.EgjGvlGbH1cHzzpIpISVShCoN9EbDudMDXZzGDSYYSk";
+
+// ── Auth token state (مش sessionStorage عشان Auth بيتحكم فيها) ────────────────
+let _authToken = null; // JWT from Supabase Auth
+let _authRefreshToken = null;
+
+const supa = async (path, opts = {}) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const token = _authToken || SUPA_KEY;
+    const r = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
+      headers: {
+        "apikey": SUPA_KEY,
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Prefer": opts.prefer || "return=representation",
+      },
+      signal: controller.signal,
+      ...opts,
+    });
+    clearTimeout(timeout);
+    if (!r.ok) {
+      console.error(`Supabase error ${r.status} on ${path}`);
+      return null;
+    }
+    const text = await r.text();
+    return text ? JSON.parse(text) : null;
+  } catch (e) {
+    clearTimeout(timeout);
+    if (e.name !== "AbortError") console.error("Supabase fetch error:", e);
+    return null;
+  }
+};
+
+// ── Supabase Auth API ─────────────────────────────────────────────────────────
+const Auth = {
+  // تسجيل دخول بالإيميل والباسورد
+  async signIn(email, password) {
+    try {
+      const r = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "apikey": SUPA_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await r.json();
+      if (!r.ok) return { error: data.error_description || data.msg || "خطأ في تسجيل الدخول" };
+      _authToken = data.access_token;
+      _authRefreshToken = data.refresh_token;
+      AuthSession.save(data.access_token, data.refresh_token, data.user?.id);
+      return { user: data.user, token: data.access_token };
+    } catch(e) { return { error: "تعذر الاتصال بالسيرفر" }; }
+  },
+
+  // إنشاء حساب جديد (Owner/Trainer بيعملها للعملاء والمدربين)
+  async signUp(email, password) {
+    try {
+      const r = await fetch(`${SUPA_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: { "apikey": SUPA_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await r.json();
+      if (!r.ok) return { error: data.error_description || data.msg || "خطأ في إنشاء الحساب" };
+      // لو الـ email confirmation مفعّل، data.user هيكون null
+      return { user: data.user, session: data.session };
+    } catch(e) { return { error: "تعذر الاتصال بالسيرفر" }; }
+  },
+
+  // إنشاء حساب بدون تأكيد إيميل (admin API — بيستخدم service role key لو متاح)
+  // بديل: استخدم signUp العادية وبعدين امسح إيميل التأكيد من Supabase dashboard
+  async adminCreateUser(email, password) {
+    // نفس signUp بس بنرجع الـ id حتى لو ما اتأكدش
+    return await Auth.signUp(email, password);
+  },
+
+  // تسجيل خروج
+  async signOut() {
+    try {
+      if (_authToken) {
+        await fetch(`${SUPA_URL}/auth/v1/logout`, {
+          method: "POST",
+          headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${_authToken}` },
+        });
+      }
+    } catch {}
+    _authToken = null;
+    _authRefreshToken = null;
+    AuthSession.clear();
+  },
+
+  // تجديد الـ token
+  async refresh() {
+    if (!_authRefreshToken) return false;
+    try {
+      const r = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { "apikey": SUPA_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: _authRefreshToken }),
+      });
+      if (!r.ok) return false;
+      const data = await r.json();
+      _authToken = data.access_token;
+      _authRefreshToken = data.refresh_token;
+      AuthSession.save(data.access_token, data.refresh_token, data.user?.id);
+      return true;
+    } catch { return false; }
+  },
+
+  // جلب المستخدم الحالي من الـ token
+  async getUser() {
+    if (!_authToken) return null;
+    try {
+      const r = await fetch(`${SUPA_URL}/auth/v1/user`, {
+        headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${_authToken}` },
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  },
+
+  // تغيير الباسورد للمستخدم الحالي
+  async updatePassword(newPassword) {
+    if (!_authToken) return { error: "غير مسجل دخول" };
+    try {
+      const r = await fetch(`${SUPA_URL}/auth/v1/user`, {
+        method: "PUT",
+        headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${_authToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      const data = await r.json();
+      if (!r.ok) return { error: data.error_description || data.msg || "خطأ في تغيير الباسورد" };
+      return { success: true };
+    } catch { return { error: "تعذر الاتصال" }; }
+  },
+};
+
+// ── Auth Session Storage ──────────────────────────────────────────────────────
+const AUTH_SESSION_KEY = "elghol_auth_v2";
+const AuthSession = {
+  save(token, refresh, authId) {
+    try { sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({ token, refresh, authId })); } catch {}
+  },
+  load() {
+    try {
+      const s = sessionStorage.getItem(AUTH_SESSION_KEY);
+      return s ? JSON.parse(s) : null;
+    } catch { return null; }
+  },
+  clear() { try { sessionStorage.removeItem(AUTH_SESSION_KEY); } catch {} },
+};
+
+// ── Password Hashing (SHA-256 via Web Crypto API) — للـ legacy ────────────────
+const hashPassword = async (password) => {
+  const msgBuffer = new TextEncoder().encode(password);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+};
+
+const verifyPassword = async (plain, hashed) => {
+  if (!hashed || !hashed.startsWith("sha256:")) return plain === hashed;
+  const h = await hashPassword(plain);
+  return "sha256:" + h === hashed;
+};
+
+const storePassword = async (plain) => {
+  const h = await hashPassword(plain);
+  return "sha256:" + h;
+};
+
+// ── Legacy Session (kept for backward compat) ─────────────────────────────────
+const SESSION_KEY = "elghol_session_v1";
+const Session = {
+  save(userId) { try { sessionStorage.setItem(SESSION_KEY, userId); } catch {} },
+  load()       { try { return sessionStorage.getItem(SESSION_KEY); } catch { return null; } },
+  clear()      { try { sessionStorage.removeItem(SESSION_KEY); } catch {} },
+};
+
+// ── Input Sanitization ────────────────────────────────────────────────────────
+const sanitize = (str) => String(str || "").trim().replace(/[<>\"'`]/g, "");
+const sanitizeNum = (v, min = 0, max = 9999) => {
+  const n = parseFloat(v);
+  if (isNaN(n)) return null;
+  return Math.min(max, Math.max(min, n));
+};
+
+// ── Validation helpers ────────────────────────────────────────────────────────
+const validate = {
+  username: (v) => /^[a-zA-Z0-9_]{3,30}$/.test(v) ? null : "اسم المستخدم: 3-30 حرف إنجليزي أو أرقام أو _",
+  password: (v) => v.length >= 6 ? null : "الباسورد لازم 6 أحرف على الأقل",
+  name: (v) => v.trim().length >= 2 ? null : "الاسم لازم حرفين على الأقل",
+  phone: (v) => !v || /^[\d\s\+\-]{7,15}$/.test(v) ? null : "رقم التليفون غير صحيح",
+  age: (v) => !v || (parseInt(v) >= 5 && parseInt(v) <= 100) ? null : "السن لازم يكون بين 5 و 100",
+  weight: (v) => !v || (parseFloat(v) >= 20 && parseFloat(v) <= 300) ? null : "الوزن لازم يكون بين 20 و 300 كيلو",
+  height: (v) => !v || (parseFloat(v) >= 100 && parseFloat(v) <= 250) ? null : "الطول لازم يكون بين 100 و 250 سم",
+};
+
+const DB = {
+  async loadAll() {
+    try {
+      const [users, schedules, files] = await Promise.all([
+        supa("users?select=*&order=id"),
+        supa("schedules?select=*&order=id"),
+        supa("client_files?select=*&order=createdAt.desc"),
+      ]);
+      // كل عميل عنده ملف واحد — خد أحدث واحد
+      // ملاحظة: الـ column اسمه "clientId" بالـ quotes في Supabase
+      const clientFiles = {};
+      (files || []).forEach(f => {
+        // Supabase بيرجع الـ quoted columns كـ camelCase
+        const cid = f["clientId"] || f.clientId;
+        if (!cid) return;
+        const existing = clientFiles[cid];
+        const fDate = f["createdAt"] || f.createdAt || "";
+        const exDate = existing?._createdAt || "";
+        if (!existing || fDate > exDate) {
+          clientFiles[cid] = { ...(f.data || {}), _createdAt: fDate };
+        }
+      });
+      return { users: users || [], schedules: schedules || [], clientFiles };
+    } catch(e) { console.error("DB.loadAll error:", e); return null; }
+  },
+
+  async upsertUser(user) {
+    try {
+      if (user.password && !user.password.startsWith("sha256:")) {
+        console.warn("upsertUser: plain-text password detected, skipping save");
+        return;
+      }
+      const res = await supa("users", {
+        method: "POST",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: JSON.stringify(user)
+      });
+      return res;
+    } catch(e) { console.error("upsertUser error:", e); }
+  },
+
+  async deleteUser(id) {
+    try {
+      await supa(`users?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
+    } catch(e) { console.error("deleteUser error:", e); }
+  },
+
+  async upsertSchedule(sc) {
+    try {
+      await supa("schedules", {
+        method: "POST",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: JSON.stringify(sc)
+      });
+    } catch(e) { console.error("upsertSchedule error:", e); }
+  },
+
+  async deleteSchedule(id) {
+    try {
+      await supa(`schedules?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
+    } catch(e) { console.error("deleteSchedule error:", e); }
+  },
+
+  async addClientFile(clientId, type, data) {
+    try {
+      const payload = {
+        id: uid(),
+        "clientId": clientId,
+        type,
+        data,
+        "createdAt": new Date().toISOString(),
+      };
+      await supa("client_files", { method: "POST", prefer: "return=minimal", body: JSON.stringify(payload) });
+    } catch(e) { console.error("addClientFile error:", e); }
+  },
+
+  // تحديث ملف موجود بدل ما تضيف واحد جديد كل مرة
+  async upsertClientFile(clientId, type, data, existingId) {
+    try {
+      const payload = {
+        id: existingId || uid(),
+        "clientId": clientId,
+        type,
+        data,
+        "createdAt": new Date().toISOString(),
+      };
+      await supa("client_files", {
+        method: "POST",
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: JSON.stringify(payload)
+      });
+    } catch(e) { console.error("upsertClientFile error:", e); }
+  },
+
+  async fetchUsersUpdatedAfter(isoTs) {
+    try { return await supa(`users?updated_at=gt.${encodeURIComponent(isoTs)}&select=*`); }
+    catch { return null; }
+  },
+};
+
+// ── Seed (passwords pre-hashed as sha256:hash) ───────────────────────────────
+// owner pw: "mohamed ayman 12345##"  |  train123 → sha256:d488f...
+const SEED = {
+  users: [
+    { id: "owner1", role: "owner",   name: "Mohamed Ayman", username: "Mohamed_Ayman", password: "sha256:eb47c2de94629d6038c395ffd302c6c91cc7e98d8ad04da8d14e4cbc81095772", avatar: "👑" },
+    { id: "tr1",    role: "trainer", name: "Mohamed Ali",   username: "trainer1", password: "sha256:d488fb79d87849d19b73c7e0da7da0229fd59cc14d3092e89487ec6beaec5081", avatar: "💪", specialty: "Strength & Conditioning" },
+    { id: "tr2",    role: "trainer", name: "Sara Hassan",   username: "trainer2", password: "sha256:d488fb79d87849d19b73c7e0da7da0229fd59cc14d3092e89487ec6beaec5081", avatar: "🏃", specialty: "Cardio & Yoga" },
+  ],
+  clientFiles: {},
+  schedules: [
+    { id: "sc1", trainerId: "tr1", trainerName: "Mohamed Ali", title: "Upper Body Power", day: "الأحد",    time: "08:00", duration: 60, capacity: 15, type: "strength" },
+    { id: "sc2", trainerId: "tr2", trainerName: "Sara Hassan", title: "Morning Cardio",   day: "الاثنين", time: "07:00", duration: 45, capacity: 20, type: "cardio"   },
+  ],
+};
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+// ── Subscription helpers ──────────────────────────────────────────────────────
+const today = () => new Date().toISOString().split("T")[0];
+
+function subStatus(client) {
+  if (!client.endDate) return { status: "none", label: "بدون اشتراك", color: "#6b6b85", daysLeft: null, discount: false };
+  const end  = new Date(client.endDate);
+  const now  = new Date(today());
+  const diff = Math.ceil((end - now) / 86400000);
+  if (diff < 0)  return { status: "expired", label: "منتهي",        color: "#e84545", daysLeft: diff, discount: false };
+  if (diff <= 5) return { status: "warning", label: `${diff} يوم`,   color: "#f0a500", daysLeft: diff, discount: true };
+  return            { status: "active",  label: `${diff} يوم`,   color: "#2ecc71", daysLeft: diff, discount: false };
+}
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const G = {
+  bg: "#0a0a0d", card: "#101014", card2: "#16161c", border: "#222230",
+  gold: "#cc1f1f", goldL: "#e83030", red: "#cc1f1f", green: "#2ecc71",
+  blue: "#5b8dee", purple: "#9b59b6", orange: "#f0a500",
+  text: "#e8e8f0", muted: "#6b6b85",
+};
+
+const css = `
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:${G.bg};color:${G.text};font-family:'Segoe UI',Tahoma,Arial,sans-serif}
+  ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.gold};border-radius:3px}
+  input,select,textarea{outline:none}
+  .fade{animation:fd .3s ease}
+  @keyframes fd{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  @keyframes glow{0%,100%{filter:drop-shadow(0 0 8px #cc1f1f55)}50%{filter:drop-shadow(0 0 22px #cc1f1f99)}}
+`;
+
+// ── UI Atoms ──────────────────────────────────────────────────────────────────
+const Btn = ({ children, onClick, v = "gold", style = {}, disabled }) => {
+  const base = { padding: "9px 20px", borderRadius: 8, border: "none", cursor: disabled ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 13, transition: "all .2s", opacity: disabled ? .5 : 1, ...style };
+  const vs = { gold: { background: `linear-gradient(135deg,${G.gold},${G.goldL})`, color: "#fff" }, outline: { background: "transparent", color: G.gold, border: `1.5px solid ${G.gold}` }, red: { background: G.red, color: "#fff" }, ghost: { background: G.card2, color: G.text, border: `1px solid ${G.border}` } };
+  return <button style={{ ...base, ...vs[v] }} onClick={onClick} disabled={disabled}>{children}</button>;
+};
+
+const Inp = ({ label, ...p }) => (
+  <div style={{ marginBottom: 12 }}>
+    {label && <label style={{ display: "block", marginBottom: 5, fontSize: 12, color: G.muted, fontWeight: 600 }}>{label}</label>}
+    <input style={{ width: "100%", padding: "9px 13px", background: G.card2, border: `1.5px solid ${G.border}`, borderRadius: 8, color: G.text, fontSize: 13 }} {...p} />
+  </div>
+);
+
+const Sel = ({ label, children, ...p }) => (
+  <div style={{ marginBottom: 12 }}>
+    {label && <label style={{ display: "block", marginBottom: 5, fontSize: 12, color: G.muted, fontWeight: 600 }}>{label}</label>}
+    <select style={{ width: "100%", padding: "9px 13px", background: G.card2, border: `1.5px solid ${G.border}`, borderRadius: 8, color: G.text, fontSize: 13 }} {...p}>{children}</select>
+  </div>
+);
+
+const Card = ({ children, style = {} }) => (
+  <div style={{ background: G.card, border: `1px solid ${G.border}`, borderRadius: 14, padding: 18, ...style }}>{children}</div>
+);
+
+const Badge = ({ children, color = G.gold }) => (
+  <span style={{ background: color + "22", color, border: `1px solid ${color}44`, borderRadius: 20, padding: "3px 9px", fontSize: 11, fontWeight: 700 }}>{children}</span>
+);
+
+const Modal = ({ title, onClose, children, wide }) => (
+  <div style={{ position: "fixed", inset: 0, background: "#000b", zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="fade" style={{ background: G.card, border: `1px solid ${G.border}`, borderRadius: 16, padding: 26, width: "100%", maxWidth: wide ? 780 : 520, maxHeight: "92vh", overflowY: "auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h3 style={{ color: G.gold, fontSize: 17, fontWeight: 700 }}>{title}</h3>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: G.muted, cursor: "pointer", fontSize: 20 }}>✕</button>
+      </div>
+      {children}
+    </div>
+  </div>
+);
+
+// ── Subscription bar widget ───────────────────────────────────────────────────
+function SubBar({ client }) {
+  const s = subStatus(client);
+  if (s.status === "none") return null;
+  const start = new Date(client.startDate);
+  const end   = new Date(client.endDate);
+  const total = Math.ceil((end - start) / 86400000);
+  const left  = Math.max(0, s.daysLeft ?? 0);
+  const pct   = total > 0 ? Math.min(100, Math.round((left / total) * 100)) : 0;
+  return (
+    <div style={{ marginTop: 10, padding: "8px 10px", background: G.card2, borderRadius: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 11 }}>
+        <span style={{ color: G.muted }}>📅 {client.startDate} → {client.endDate}</span>
+        <span style={{ color: s.color, fontWeight: 700 }}>
+          {s.status === "expired" ? "⚠️ منتهي" : `⏳ ${s.label} متبقي`}
+        </span>
+      </div>
+      <div style={{ height: 5, background: G.border, borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: s.color, borderRadius: 4, transition: "width .5s" }} />
+      </div>
+    </div>
+  );
+}
+
+// ── Renew modal ───────────────────────────────────────────────────────────────
+const PLAN_PRICES = { 30: 300, 90: 800, 180: 1500, 365: 2800 };
+
+function RenewModal({ client, onSave, onClose }) {
+  const sub = subStatus(client);
+  const hasDiscount = sub.discount; // true if within 5 days of expiry
+
+  const plans = [
+    { label: "شهر (30 يوم)",    days: 30  },
+    { label: "3 أشهر (90 يوم)", days: 90  },
+    { label: "6 أشهر (180 يوم)",days: 180 },
+    { label: "سنة (365 يوم)",   days: 365 },
+  ];
+  const [plan, setPlan] = useState(30);
+  const [startD, setStartD] = useState(today());
+
+  const calcEnd = () => {
+    const d = new Date(startD);
+    d.setDate(d.getDate() + plan);
+    return d.toISOString().split("T")[0];
+  };
+
+  const basePrice = PLAN_PRICES[plan] || 0;
+  const discountedPrice = hasDiscount ? Math.round(basePrice * 0.9) : basePrice;
+  const saved = basePrice - discountedPrice;
+
+  return (
+    <Modal title={`تجديد اشتراك — ${client.name}`} onClose={onClose}>
+      {hasDiscount && (
+        <div style={{ background: "#f0a50018", border: "1.5px solid #f0a50066", borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ fontSize: 28 }}>🎉</div>
+          <div>
+            <div style={{ color: G.orange, fontWeight: 900, fontSize: 14 }}>خصم 10% خاص بيك!</div>
+            <div style={{ color: G.muted, fontSize: 12, marginTop: 3 }}>
+              لأنك بتجدد قبل انتهاء الاشتراك بـ <strong style={{ color: G.orange }}>{sub.daysLeft} {sub.daysLeft === 1 ? "يوم" : "أيام"}</strong> — استغل الفرصة دلوقتي!
+            </div>
+          </div>
+        </div>
+      )}
+
+      <Sel label="اختار الباقة" value={plan} onChange={e => setPlan(+e.target.value)}>
+        {plans.map(p => <option key={p.days} value={p.days}>{p.label}</option>)}
+      </Sel>
+      <Inp label="تاريخ البداية" type="date" value={startD} onChange={e => setStartD(e.target.value)} />
+
+      <div style={{ background: G.card2, borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: hasDiscount ? 10 : 0 }}>
+          <span style={{ color: G.muted, fontSize: 13 }}>تاريخ الانتهاء</span>
+          <span style={{ color: G.gold, fontWeight: 700, fontSize: 15 }}>📅 {calcEnd()}</span>
+        </div>
+        {hasDiscount && (
+          <div style={{ borderTop: `1px solid ${G.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: G.muted }}>السعر الأصلي</span>
+              <span style={{ color: G.muted, textDecoration: "line-through" }}>{basePrice} جنيه</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: G.orange }}>خصم 10%</span>
+              <span style={{ color: G.orange }}>- {saved} جنيه</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 900, marginTop: 4, borderTop: `1px dashed ${G.border}`, paddingTop: 6 }}>
+              <span style={{ color: G.green }}>السعر بعد الخصم</span>
+              <span style={{ color: G.green }}>💰 {discountedPrice} جنيه</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <Btn onClick={() => onSave(startD, calcEnd(), hasDiscount ? 10 : 0)} style={{ width: "100%" }}>
+        {hasDiscount ? `✅ تجديد بخصم 10% — ${discountedPrice} جنيه` : "✅ تجديد الاشتراك"}
+      </Btn>
+    </Modal>
+  );
+}
+
+const Sidebar = ({ tabs, active, setActive, user, role, onLogout }) => {
+  const roleColor = { owner: G.gold, trainer: G.blue, client: G.green };
+  return (
+    <div style={{ width: 210, background: G.card, borderRight: `1px solid ${G.border}`, display: "flex", flexDirection: "column", flexShrink: 0, minHeight: "100vh" }}>
+      <div style={{ padding: "14px 12px 12px", borderBottom: `1px solid ${G.border}`, background: "linear-gradient(180deg,#1a0303 0%,transparent 100%)" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 32, marginBottom: 4 }}>🏋️</div>
+          <div style={{ fontSize: 18, fontWeight: 900, color: G.red, letterSpacing: 2 }}>EI GHOL GYM</div>
+          <div style={{ fontSize: 9, color: "#888", letterSpacing: 2, textTransform: "uppercase", lineHeight: 1.6 }}>الغول جيم كيان مش مكان</div>
+          <div style={{ fontSize: 9, color: G.red, letterSpacing: 1, marginTop: 2, fontWeight: 700 }}>مدرسة الغول</div>
+        </div>
+      </div>
+      <div style={{ flex: 1, padding: "10px 8px" }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setActive(t.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "10px 11px", borderRadius: 8, border: "none", background: active === t.id ? G.gold + "1a" : "transparent", color: active === t.id ? G.gold : G.muted, cursor: "pointer", fontSize: 13, fontWeight: active === t.id ? 700 : 400, marginBottom: 3, borderLeft: active === t.id ? `3px solid ${G.gold}` : "3px solid transparent" }}>
+            <span style={{ fontSize: 16 }}>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ padding: "14px 16px", borderTop: `1px solid ${G.border}` }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{user.avatar} {user.name}</div>
+        <Badge color={roleColor[role]}>{role.toUpperCase()}</Badge>
+        <br /><br />
+        <Btn onClick={onLogout} v="ghost" style={{ width: "100%", fontSize: 12 }}>🚪 خروج</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RESET PASSWORD MODAL (trainer resets for client — no old password needed)
+// ══════════════════════════════════════════════════════════════════════════════
+function ResetPasswordModal({ target, onSave, onClose }) {
+  const [newPass, setNewPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr]         = useState("");
+  const [success, setSuccess] = useState(false);
+  const [saving, setSaving]   = useState(false);
+
+  const save = async () => {
+    setErr("");
+    const ve = validate.password(newPass);
+    if (ve)              { setErr("❌ " + ve); return; }
+    if (newPass !== confirm) { setErr("❌ تأكيد الباسورد مش متطابق"); return; }
+    setSaving(true);
+    const hashed = await storePassword(newPass);
+    onSave(target.id, hashed);
+    setSuccess(true);
+    setSaving(false);
+    setTimeout(onClose, 1200);
+  };
+
+  return (
+    <Modal title={`🔑 تغيير باسورد — ${target.name}`} onClose={onClose}>
+      {success ? (
+        <div style={{ textAlign:"center", padding:"30px 0" }}>
+          <div style={{ fontSize:48, marginBottom:12 }}>✅</div>
+          <div style={{ color:G.green, fontWeight:700, fontSize:16 }}>تم تغيير الباسورد بنجاح!</div>
+        </div>
+      ) : (
+        <>
+          <div style={{ background:G.card2, borderRadius:10, padding:"10px 14px", marginBottom:16, fontSize:13, color:G.muted }}>
+            👤 <strong style={{ color:G.text }}>{target.name}</strong> — @{target.username}
+          </div>
+          <Inp label="الباسورد الجديد (6 أحرف على الأقل)" type="password" value={newPass}  onChange={e => { setNewPass(e.target.value);  setErr(""); }} placeholder="••••••••" />
+          <Inp label="تأكيد الباسورد"  type="password" value={confirm} onChange={e => { setConfirm(e.target.value); setErr(""); }} placeholder="••••••••" />
+          {err && <p style={{ color:G.red, fontSize:13, marginBottom:12 }}>{err}</p>}
+          <Btn onClick={save} style={{ width:"100%" }} disabled={saving}>{saving ? "⏳ جاري الحفظ..." : "💾 حفظ الباسورد الجديد"}</Btn>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CHANGE PASSWORD MODAL — يستخدم Supabase Auth لو الحساب مرتبط
+// ══════════════════════════════════════════════════════════════════════════════
+function ChangePasswordModal({ user, onSave, onClose }) {
+  const [current, setCurrent] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState("");
+  const [success, setSuccess] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setErr("");
+    const ve = validate.password(newPass);
+    if (ve)                         { setErr("❌ " + ve); return; }
+    if (newPass !== confirm)        { setErr("❌ تأكيد الباسورد مش متطابق"); return; }
+    setSaving(true);
+
+    // تحقق من الباسورد الحالي دايماً من الـ hash المحلي
+    const ok = await verifyPassword(current, user.password);
+    if (!ok) { setErr("❌ الباسورد الحالي غلط"); setSaving(false); return; }
+
+    // لو عنده Auth token → غيّر الباسورد في Supabase Auth برضو
+    if (_authToken && user.email) {
+      const res = await Auth.updatePassword(newPass);
+      if (res.error) { setErr("⚠️ " + res.error); setSaving(false); return; }
+    }
+
+    // حدّث الـ hash المحلي
+    const hashed = await storePassword(newPass);
+    onSave(hashed);
+    setSuccess(true);
+    setSaving(false);
+    setTimeout(onClose, 1200);
+  };
+
+  return (
+    <Modal title="🔑 تغيير الباسورد" onClose={onClose}>
+      {success ? (
+        <div style={{ textAlign:"center", padding:"30px 0" }}>
+          <div style={{ fontSize:48, marginBottom:12 }}>✅</div>
+          <div style={{ color:G.green, fontWeight:700, fontSize:16 }}>تم تغيير الباسورد بنجاح!</div>
+        </div>
+      ) : (
+        <>
+          <Inp label="الباسورد الحالي" type="password" value={current} onChange={e => { setCurrent(e.target.value); setErr(""); }} placeholder="••••••••" />
+          <Inp label="الباسورد الجديد (6 أحرف على الأقل)" type="password" value={newPass}  onChange={e => { setNewPass(e.target.value);  setErr(""); }} placeholder="••••••••" />
+          <Inp label="تأكيد الباسورد الجديد" type="password" value={confirm} onChange={e => { setConfirm(e.target.value); setErr(""); }} placeholder="••••••••" />
+          {err && <p style={{ color:G.red, fontSize:13, marginBottom:12 }}>{err}</p>}
+          <Btn onClick={save} style={{ width:"100%" }} disabled={saving}>{saving ? "⏳ جاري الحفظ..." : "💾 حفظ الباسورد"}</Btn>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LOGIN — Supabase Auth (email + password)
+// ══════════════════════════════════════════════════════════════════════════════
+function Login({ data, onLogin }) {
+  const [tab, setTab]       = useState("login"); // "login" | "legacy"
+  const [email, setEmail]   = useState("");
+  const [u, setU]           = useState(""); // legacy username
+  const [p, setP]           = useState("");
+  const [err, setErr]       = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // ── Supabase Auth Login ──────────────────────────────────────────────────
+  const goAuth = async () => {
+    if (loading) return;
+    setErr("");
+    const emailTrim = sanitize(email).toLowerCase();
+    if (!emailTrim || !p) { setErr("ادخل الإيميل والباسورد ❌"); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrim)) { setErr("الإيميل غير صحيح ❌"); return; }
+
+    setLoading(true);
+    try {
+      const res = await Auth.signIn(emailTrim, p);
+      if (res.error) { setErr("❌ " + res.error); return; }
+
+      // ابحث عن المستخدم في جدول users بالـ auth_id أو email
+      const authId = res.user?.id;
+      const users = data?.users || [];
+      let found = users.find(x => x.auth_id === authId);
+      if (!found) found = users.find(x => x.email === emailTrim);
+      if (!found) {
+        await Auth.signOut();
+        setErr("❌ الحساب غير مرتبط بأي مستخدم. تواصل مع الأدمن.");
+        return;
+      }
+      // تحديث auth_id لو ما كانش موجود
+      if (!found.auth_id && authId) {
+        DB.upsertUser({ ...found, auth_id: authId });
+      }
+      Session.save(found.id);
+      onLogin(found);
+    } finally { setLoading(false); }
+  };
+
+  // ── Legacy Login (username + sha256 password) ────────────────────────────
+  const goLegacy = async () => {
+    if (loading) return;
+    setErr("");
+    const uTrim = sanitize(u);
+    if (!uTrim || !p) { setErr("ادخل اسم المستخدم والباسورد ❌"); return; }
+
+    const now = Date.now();
+    const attempts = JSON.parse(sessionStorage.getItem("login_attempts") || "[]")
+      .filter(t => now - t < 60000);
+    if (attempts.length >= 5) {
+      const wait = Math.ceil((60000 - (now - attempts[0])) / 1000);
+      setErr(`❌ كتير أوي — استنى ${wait} ثانية وحاول تاني`);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const users = data?.users || [];
+      const found = users.find(x => x.username === uTrim);
+      if (!found) {
+        attempts.push(now); sessionStorage.setItem("login_attempts", JSON.stringify(attempts));
+        setErr("اسم المستخدم أو الباسورد غلط ❌"); return;
+      }
+      const ok = await verifyPassword(p, found.password);
+      if (!ok) {
+        attempts.push(now); sessionStorage.setItem("login_attempts", JSON.stringify(attempts));
+        setErr("اسم المستخدم أو الباسورد غلط ❌"); return;
+      }
+      sessionStorage.removeItem("login_attempts");
+      if (!found.password.startsWith("sha256:")) {
+        const hashed = await storePassword(p);
+        DB.upsertUser({ ...found, password: hashed });
+      }
+      Session.save(found.id);
+      onLogin(found);
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: `radial-gradient(ellipse at 30% 20%,#200303,${G.bg} 60%)` }}>
+      <div className="fade" style={{ width: "100%", maxWidth: 420, padding: 16 }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 64, marginBottom: 10, animation: "glow 3s ease-in-out infinite", display: "inline-block" }}>🏋️</div>
+          <h1 style={{ fontSize: 36, fontWeight: 900, color: G.red, letterSpacing: 3, lineHeight: 1 }}>EI GHOL GYM</h1>
+          <p style={{ color: G.muted, fontSize: 11, letterSpacing: 2, marginTop: 6 }}>الغول جيم — كيان مش مكان</p>
+          <p style={{ color: G.red, fontSize: 10, letterSpacing: 1, marginTop: 3, opacity: 0.8 }}>مدرسة الغول</p>
+        </div>
+
+        {/* Tab switcher */}
+        <div style={{ display:"flex", background:G.card2, borderRadius:10, padding:4, marginBottom:18, border:`1px solid ${G.border}` }}>
+          <button onClick={() => { setTab("login"); setErr(""); }}
+            style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", background:tab==="login"?G.gold:"transparent", color:tab==="login"?"#000":G.muted, fontWeight:700, fontSize:13, cursor:"pointer" }}>
+            📧 دخول بالإيميل
+          </button>
+          <button onClick={() => { setTab("legacy"); setErr(""); }}
+            style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", background:tab==="legacy"?G.card:"transparent", color:tab==="legacy"?G.text:G.muted, fontWeight:600, fontSize:12, cursor:"pointer" }}>
+            👤 دخول باسم المستخدم
+          </button>
+        </div>
+
+        <Card>
+          {tab === "login" ? (
+            <>
+              <Inp label="الإيميل" type="email" value={email} onChange={e => { setEmail(e.target.value); setErr(""); }}
+                placeholder="example@gmail.com" onKeyDown={e => e.key === "Enter" && goAuth()} />
+              <Inp label="الباسورد" type="password" value={p} onChange={e => { setP(e.target.value); setErr(""); }}
+                placeholder="••••••••" onKeyDown={e => e.key === "Enter" && goAuth()} />
+              {err && <p style={{ color: G.red, fontSize: 12, marginBottom: 10 }}>{err}</p>}
+              <Btn onClick={goAuth} style={{ width: "100%" }} disabled={loading}>
+                {loading ? "⏳ جاري التحقق..." : "🔐 دخول"}
+              </Btn>
+            </>
+          ) : (
+            <>
+              <Inp label="اسم المستخدم" value={u} onChange={e => { setU(e.target.value); setErr(""); }}
+                placeholder="username" onKeyDown={e => e.key === "Enter" && goLegacy()} />
+              <Inp label="الباسورد" type="password" value={p} onChange={e => { setP(e.target.value); setErr(""); }}
+                placeholder="••••••••" onKeyDown={e => e.key === "Enter" && goLegacy()} />
+              {err && <p style={{ color: G.red, fontSize: 12, marginBottom: 10 }}>{err}</p>}
+              <Btn onClick={goLegacy} style={{ width: "100%" }} disabled={loading}>
+                {loading ? "⏳ جاري التحقق..." : "دخول"}
+              </Btn>
+            </>
+          )}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXPIRED SCREEN
+// ══════════════════════════════════════════════════════════════════════════════
+function ExpiredScreen({ user, trainer, onLogout }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: `radial-gradient(ellipse at center, #1f0303, ${G.bg} 55%)`, padding: 24 }}>
+      <div className="fade" style={{ textAlign: "center", maxWidth: 420 }}>
+        <div style={{ fontSize: 80, marginBottom: 16, animation: "pulse 2s infinite" }}>🏋️</div>
+        <h2 style={{ fontSize: 28, fontWeight: 900, color: G.red, marginBottom: 8 }}>اشتراكك انتهى</h2>
+        <p style={{ color: G.muted, fontSize: 15, lineHeight: 1.7, marginBottom: 28 }}>
+          للأسف انتهت مدة اشتراكك في <strong style={{ color: G.gold }}>Elghol Gym</strong>.<br />
+          تواصل مع مدربك لتجديد الاشتراك ومتابعة رحلتك.
+        </p>
+        {trainer && (
+          <div style={{ background: G.card, border: `1px solid ${G.red}44`, borderRadius: 14, padding: "18px 22px", marginBottom: 24 }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>{trainer.avatar || "💪"}</div>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>مدربك: {trainer.name}</div>
+            {trainer.specialty && <div style={{ color: G.muted, fontSize: 13, marginBottom: 8 }}>{trainer.specialty}</div>}
+            {trainer.phone && (
+              <a href={`tel:${trainer.phone}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 18px", background: G.green + "22", border: `1px solid ${G.green}44`, borderRadius: 8, color: G.green, textDecoration: "none", fontWeight: 700, fontSize: 13 }}>
+                📞 {trainer.phone}
+              </a>
+            )}
+          </div>
+        )}
+        <div style={{ background: G.card2, border: `1px solid ${G.border}`, borderRadius: 10, padding: "12px 16px", marginBottom: 24, fontSize: 13 }}>
+          <div style={{ color: G.muted, marginBottom: 4 }}>تاريخ انتهاء الاشتراك</div>
+          <div style={{ color: G.red, fontWeight: 700, fontSize: 16 }}>📅 {user.endDate}</div>
+        </div>
+        <Btn onClick={onLogout} v="ghost" style={{ width: "100%" }}>🚪 خروج</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLIENT FILE EDITOR
+// ══════════════════════════════════════════════════════════════════════════════
+const DAYS_AR = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+const TYPE_COLOR = { strength: G.red, cardio: G.green, yoga: G.purple, hiit: G.gold, rest: G.muted, flexibility: G.blue };
+
+function emptyFile() {
+  return {
+    workoutDays: DAYS_AR.map(d => ({ day: d, type: "rest", splitName: "", exercises: [] })),
+    nutritionPlan: { calories: "", protein: "", carbs: "", fats: "", meals: ["", "", "", ""] },
+    supplements: [],
+    vitamins: [],
+    notes: "",
+    updatedAt: "",
+  };
+}
+
+function ClientFileEditor({ client, file, onSave, onClose }) {
+  const [tab, setTab] = useState("workout");
+  const [f, setF] = useState(file || emptyFile());
+
+  const updateDay = (i, key, val) => setF(prev => {
+    const days = prev.workoutDays.map((d, idx) => idx === i ? { ...d, [key]: val } : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const addEx = (dayIdx) => setF(prev => {
+    const days = prev.workoutDays.map((d, i) => i === dayIdx
+      ? { ...d, exercises: [...d.exercises, { id: uid(), name: "", sets: 3, reps: 10, rest: 60, technique: "normal", groupId: null }] }
+      : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const addGroup = (dayIdx, type) => setF(prev => {
+    const groupId = uid();
+    const count = type === "superset" ? 2 : 3;
+    const newExercises = Array.from({ length: count }, () => ({
+      id: uid(), name: "", sets: 3, reps: 10, rest: 60, technique: type, groupId
+    }));
+    const days = prev.workoutDays.map((d, i) => i === dayIdx
+      ? { ...d, exercises: [...d.exercises, ...newExercises] }
+      : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const addToGroup = (dayIdx, groupId) => setF(prev => {
+    const days = prev.workoutDays.map((d, i) => {
+      if (i !== dayIdx) return d;
+      const grpEx = d.exercises.find(e => e.groupId === groupId);
+      const tech = grpEx?.technique || "giantset";
+      const lastIdx = d.exercises.reduce((acc, e, idx) => e.groupId === groupId ? idx : acc, -1);
+      const newEx = { id: uid(), name: "", sets: 3, reps: 10, rest: 60, technique: tech, groupId };
+      const exs = [...d.exercises];
+      exs.splice(lastIdx + 1, 0, newEx);
+      return { ...d, exercises: exs };
+    });
+    return { ...prev, workoutDays: days };
+  });
+
+  const removeGroup = (dayIdx, groupId) => setF(prev => {
+    const days = prev.workoutDays.map((d, i) => i === dayIdx
+      ? { ...d, exercises: d.exercises.filter(e => e.groupId !== groupId) }
+      : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const removeEx = (dayIdx, exIdx) => setF(prev => {
+    const days = prev.workoutDays.map((d, i) => i === dayIdx ? { ...d, exercises: d.exercises.filter((_, j) => j !== exIdx) } : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const updateEx = (dayIdx, exIdx, key, val) => setF(prev => {
+    const days = prev.workoutDays.map((d, i) => i === dayIdx ? { ...d, exercises: d.exercises.map((ex, j) => j === exIdx ? { ...ex, [key]: val } : ex) } : d);
+    return { ...prev, workoutDays: days };
+  });
+
+  const updateNutr = (key, val) => setF(prev => ({ ...prev, nutritionPlan: { ...prev.nutritionPlan, [key]: val } }));
+  const updateMeal = (i, val) => setF(prev => { const meals = [...prev.nutritionPlan.meals]; meals[i] = val; return { ...prev, nutritionPlan: { ...prev.nutritionPlan, meals } }; });
+
+  const addSupp = () => setF(prev => ({ ...prev, supplements: [...(prev.supplements || []), { name: "", dose: "", timing: "", notes: "" }] }));
+  const removeSupp = (i) => setF(prev => ({ ...prev, supplements: prev.supplements.filter((_, j) => j !== i) }));
+  const updateSupp = (i, key, val) => setF(prev => { const s = prev.supplements.map((x, j) => j === i ? { ...x, [key]: val } : x); return { ...prev, supplements: s }; });
+
+  const addVit = () => setF(prev => ({ ...prev, vitamins: [...(prev.vitamins || []), { name: "", dose: "", timing: "", notes: "" }] }));
+  const removeVit = (i) => setF(prev => ({ ...prev, vitamins: (prev.vitamins || []).filter((_, j) => j !== i) }));
+  const updateVit = (i, key, val) => setF(prev => { const v = (prev.vitamins || []).map((x, j) => j === i ? { ...x, [key]: val } : x); return { ...prev, vitamins: v }; });
+
+  const save = () => onSave({ ...f, updatedAt: new Date().toISOString().split("T")[0] });
+
+  return (
+    <Modal title={`ملف ${client.name} 📁`} onClose={onClose} wide>
+      <div style={{ display: "flex", gap: 6, marginBottom: 20, borderBottom: `1px solid ${G.border}`, paddingBottom: 12, flexWrap: "wrap" }}>
+        {[["workout", "🏋️ تمارين"], ["nutrition", "🥗 تغذية"], ["supplements", "💊 مكملات"], ["vitamins", "🌿 فيتامينات"], ["notes", "📝 ملاحظات"]].map(([id, lbl]) => (
+          <button key={id} onClick={() => setTab(id)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: tab === id ? G.gold : G.card2, color: tab === id ? "#000" : G.muted, cursor: "pointer", fontWeight: 700, fontSize: 12 }}>{lbl}</button>
+        ))}
+      </div>
+
+      {tab === "workout" && (
+        <div>
+          {f.workoutDays.map((day, di) => (
+            <div key={day.day} style={{ marginBottom: 16, background: G.card2, borderRadius: 12, padding: 14, border: `1px solid ${G.border}`, borderLeft: `3px solid ${TYPE_COLOR[day.type] || G.muted}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{day.day}</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <select value={day.type} onChange={e => updateDay(di, "type", e.target.value)} style={{ padding: "5px 10px", background: G.card, border: `1px solid ${G.border}`, borderRadius: 6, color: TYPE_COLOR[day.type] || G.muted, fontSize: 12, fontWeight: 700 }}>
+                    {["rest", "strength", "cardio", "hiit", "yoga", "flexibility"].map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  {day.type !== "rest" && (
+                    <div style={{ display:"flex", gap:5 }}>
+                      <button onClick={() => addEx(di)} style={{ background: G.gold+"22", border:`1px solid ${G.gold}44`, borderRadius:6, color:G.gold, cursor:"pointer", padding:"5px 9px", fontSize:11, fontWeight:700 }}>+ تمرين</button>
+                      <button onClick={() => addGroup(di,"superset")} style={{ background: G.blue+"22", border:`1px solid ${G.blue}44`, borderRadius:6, color:G.blue, cursor:"pointer", padding:"5px 9px", fontSize:11, fontWeight:700 }}>⚡ Super</button>
+                      <button onClick={() => addGroup(di,"giantset")} style={{ background: G.purple+"22", border:`1px solid ${G.purple}44`, borderRadius:6, color:G.purple, cursor:"pointer", padding:"5px 9px", fontSize:11, fontWeight:700 }}>🔥 Giant</button>
+                      <button onClick={() => addGroup(di,"dropset")} style={{ background: G.orange+"22", border:`1px solid ${G.orange}44`, borderRadius:6, color:G.orange, cursor:"pointer", padding:"5px 9px", fontSize:11, fontWeight:700 }}>📉 Drop</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {day.type !== "rest" && (
+                <input value={day.splitName || ""} onChange={e => updateDay(di, "splitName", e.target.value)} placeholder="اسم السبليت مثال: Push Day / صدر وترايسبس"
+                  style={{ width: "100%", padding: "7px 11px", background: G.card, border: `1.5px solid ${G.gold}44`, borderRadius: 7, color: G.text, fontSize: 12, fontWeight: 600, marginBottom: 10 }} />
+              )}
+              {day.type === "rest" && <div style={{ color: G.muted, fontSize: 12, textAlign: "center", padding: "6px 0" }}>🛌 يوم راحة</div>}
+              {day.type !== "rest" && (() => {
+                const TC = { superset: G.blue, giantset: G.purple, dropset: G.orange };
+                const TL = { superset: "Super Set ⚡", giantset: "Giant Set 🔥", dropset: "Drop Set 📉" };
+                const rendered = [];
+                const seen = new Set();
+                day.exercises.forEach((ex, ei) => {
+                  if (ex.groupId && !seen.has(ex.groupId)) {
+                    seen.add(ex.groupId);
+                    const groupExs = day.exercises.filter(e => e.groupId === ex.groupId);
+                    const col = TC[ex.technique] || G.purple;
+                    rendered.push(
+                      <div key={ex.groupId} style={{ marginBottom:14, border:`2px solid ${col}66`, borderRadius:12, overflow:"hidden" }}>
+                        <div style={{ background:`${col}22`, padding:"10px 12px", borderBottom:`1px solid ${col}33` }}>
+                          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                              <div style={{ width:4, height:22, background:col, borderRadius:2 }} />
+                              <span style={{ color:col, fontWeight:900, fontSize:14 }}>{TL[ex.technique]}</span>
+                              <span style={{ background:col+"33", color:col, borderRadius:10, padding:"2px 8px", fontSize:10, fontWeight:700 }}>{groupExs.length} تمارين</span>
+                            </div>
+                            <div style={{ display:"flex", gap:5 }}>
+                              {ex.technique !== "dropset" && (
+                                <button onClick={() => addToGroup(di, ex.groupId)}
+                                  style={{ background:col+"33", border:`1px solid ${col}55`, borderRadius:6, color:col, cursor:"pointer", padding:"4px 10px", fontSize:11, fontWeight:700 }}>+ تمرين</button>
+                              )}
+                              <button onClick={() => removeGroup(di, ex.groupId)}
+                                style={{ background:G.red+"22", border:"none", borderRadius:6, color:G.red, cursor:"pointer", padding:"4px 9px", fontSize:11 }}>🗑</button>
+                            </div>
+                          </div>
+                          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                            <div>
+                              <label style={{ display:"block", fontSize:10, color:col, fontWeight:700, marginBottom:3 }}>🔁 Sets (مشتركة للكل)</label>
+                              <input type="number" value={groupExs[0].sets}
+                                onChange={e => groupExs.forEach(gex => {
+                                  const gei = day.exercises.findIndex(el => el.id === gex.id);
+                                  updateEx(di, gei, "sets", +e.target.value);
+                                })}
+                                style={{ width:"100%", padding:"7px 10px", background:G.card, border:`1.5px solid ${col}55`, borderRadius:7, color:G.text, fontSize:13, fontWeight:700 }} />
+                            </div>
+                            <div>
+                              <label style={{ display:"block", fontSize:10, color:col, fontWeight:700, marginBottom:3 }}>
+                                {ex.technique === "dropset" ? "⬇️ Weight Drop (kg)" : "⏱ Rest (ثواني) بعد الكل"}
+                              </label>
+                              <input type="number" value={groupExs[0].rest}
+                                onChange={e => groupExs.forEach(gex => {
+                                  const gei = day.exercises.findIndex(el => el.id === gex.id);
+                                  updateEx(di, gei, "rest", +e.target.value);
+                                })}
+                                style={{ width:"100%", padding:"7px 10px", background:G.card, border:`1.5px solid ${col}55`, borderRadius:7, color:G.text, fontSize:13, fontWeight:700 }} />
+                            </div>
+                          </div>
+                        </div>
+                        {groupExs.map((gex, gi) => {
+                          const gei = day.exercises.findIndex(e => e.id === gex.id);
+                          const placeholders = {
+                            superset: gi === 0 ? "مثال: Bench Press" : "مثال: Dumbbell Fly",
+                            giantset: gi === 0 ? "مثال: Squat" : gi === 1 ? "مثال: Leg Press" : "مثال: Leg Curl",
+                            dropset:  gi === 0 ? "وزن عالي (Heavy)" : gi === 1 ? "وزن متوسط (Medium)" : "وزن خفيف (Light)",
+                          };
+                          return (
+                            <div key={gex.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 12px", borderBottom: gi < groupExs.length-1 ? `1px dashed ${col}33` : "none", background: gi%2===0 ? col+"08" : "transparent" }}>
+                              <div style={{ background:col, color:"#fff", borderRadius:"50%", width:24, height:24, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:900, flexShrink:0 }}>{gi+1}</div>
+                              <div style={{ flex:1 }}>
+                                <input value={gex.name} onChange={e => updateEx(di,gei,"name",e.target.value)}
+                                  placeholder={placeholders[ex.technique] || ""}
+                                  style={{ width:"100%", padding:"7px 10px", background:G.card, border:`1px solid ${G.border}`, borderRadius:7, color:G.text, fontSize:13 }} />
+                              </div>
+                              <div style={{ width:80, flexShrink:0 }}>
+                                <label style={{ display:"block", fontSize:9, color:G.muted, marginBottom:2, textAlign:"center" }}>Reps</label>
+                                <input type="number" value={gex.reps} onChange={e => updateEx(di,gei,"reps",+e.target.value)}
+                                  style={{ width:"100%", padding:"7px 6px", background:G.card, border:`1px solid ${G.border}`, borderRadius:7, color:G.text, fontSize:13, textAlign:"center" }} />
+                              </div>
+                              <button onClick={() => removeEx(di,gei)}
+                                style={{ background:G.red+"22", border:"none", borderRadius:6, color:G.red, cursor:"pointer", padding:"8px 8px", flexShrink:0 }}>✕</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  } else if (!ex.groupId) {
+                    rendered.push(
+                      <div key={ex.id || ei} style={{ marginBottom:8 }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr auto", gap:5, alignItems:"end" }}>
+                          <Inp label={ei===0?"التمرين":""} value={ex.name} onChange={e => updateEx(di,ei,"name",e.target.value)} placeholder="مثال: Squat" />
+                          <Inp label={ei===0?"Sets":""} type="number" value={ex.sets} onChange={e => updateEx(di,ei,"sets",+e.target.value)} />
+                          <Inp label={ei===0?"Reps":""} type="number" value={ex.reps} onChange={e => updateEx(di,ei,"reps",+e.target.value)} />
+                          <Inp label={ei===0?"Rest(s)":""} type="number" value={ex.rest} onChange={e => updateEx(di,ei,"rest",+e.target.value)} />
+                          <button onClick={() => removeEx(di,ei)} style={{ background:G.red+"22", border:"none", borderRadius:6, color:G.red, cursor:"pointer", padding:"9px 7px", marginBottom:12 }}>✕</button>
+                        </div>
+                      </div>
+                    );
+                  }
+                });
+                return rendered;
+              })()}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "nutrition" && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+            <Inp label="🔥 السعرات اليومية (kcal)" type="number" value={f.nutritionPlan.calories} onChange={e => updateNutr("calories", e.target.value)} />
+            <Inp label="💪 بروتين (g)" type="number" value={f.nutritionPlan.protein} onChange={e => updateNutr("protein", e.target.value)} />
+            <Inp label="🍞 كارب (g)" type="number" value={f.nutritionPlan.carbs} onChange={e => updateNutr("carbs", e.target.value)} />
+            <Inp label="🧈 دهون (g)" type="number" value={f.nutritionPlan.fats} onChange={e => updateNutr("fats", e.target.value)} />
+          </div>
+          {f.nutritionPlan.meals.map((m, i) => (
+            <Inp key={i} label={`وجبة ${i + 1}`} value={m} onChange={e => updateMeal(i, e.target.value)} placeholder="مثال: صدر فراخ + أرز + سلطة" />
+          ))}
+          <button onClick={() => setF(prev => ({ ...prev, nutritionPlan: { ...prev.nutritionPlan, meals: [...prev.nutritionPlan.meals, ""] } }))} style={{ background: G.card2, border: `1px solid ${G.border}`, borderRadius: 6, color: G.muted, cursor: "pointer", padding: "7px 14px", fontSize: 12 }}>+ وجبة</button>
+        </div>
+      )}
+
+      {tab === "supplements" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <p style={{ color: G.muted, fontSize: 12 }}>أضف المكملات الغذائية</p>
+            <button onClick={addSupp} style={{ background: G.purple + "22", border: `1px solid ${G.purple}44`, borderRadius: 7, color: G.purple, cursor: "pointer", padding: "6px 14px", fontSize: 12, fontWeight: 700 }}>+ مكمل</button>
+          </div>
+          {(!f.supplements || f.supplements.length === 0) && <div style={{ textAlign: "center", padding: "36px 0", color: G.muted, fontSize: 13 }}><div style={{ fontSize: 40, marginBottom: 10 }}>💊</div>لا يوجد مكملات بعد</div>}
+          {(f.supplements || []).map((s, i) => (
+            <div key={i} style={{ marginBottom: 14, background: G.card2, borderRadius: 12, padding: 14, border: `1px solid ${G.border}`, borderLeft: `3px solid ${G.purple}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                <span style={{ color: G.purple, fontWeight: 700, fontSize: 13 }}>💊 مكمل {i + 1}</span>
+                <button onClick={() => removeSupp(i)} style={{ background: G.red + "22", border: "none", borderRadius: 6, color: G.red, cursor: "pointer", padding: "4px 10px", fontSize: 12 }}>✕ حذف</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8 }}>
+                <Inp label="اسم المكمل" value={s.name} onChange={e => updateSupp(i, "name", e.target.value)} placeholder="Whey Protein / Creatine" />
+                <Inp label="الجرعة" value={s.dose} onChange={e => updateSupp(i, "dose", e.target.value)} placeholder="30g" />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 8 }}>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: "block", marginBottom: 5, fontSize: 12, color: G.muted, fontWeight: 600 }}>⏰ التوقيت</label>
+                  <select value={s.timing} onChange={e => updateSupp(i, "timing", e.target.value)} style={{ width: "100%", padding: "9px 13px", background: G.card, border: `1.5px solid ${G.border}`, borderRadius: 8, color: G.text, fontSize: 13 }}>
+                    <option value="">اختار</option>
+                    {["قبل التمرين","أثناء التمرين","بعد التمرين","الصباح","قبل النوم","مع الأكل","على الريق"].map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <Inp label="ملاحظة" value={s.notes} onChange={e => updateSupp(i, "notes", e.target.value)} placeholder="مع عصير برتقان..." />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "vitamins" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <p style={{ color: G.muted, fontSize: 12 }}>أضف الفيتامينات والمعادن</p>
+            <button onClick={addVit} style={{ background: G.green + "22", border: `1px solid ${G.green}44`, borderRadius: 7, color: G.green, cursor: "pointer", padding: "6px 14px", fontSize: 12, fontWeight: 700 }}>+ فيتامين</button>
+          </div>
+          {(!f.vitamins || f.vitamins.length === 0) && <div style={{ textAlign: "center", padding: "36px 0", color: G.muted, fontSize: 13 }}><div style={{ fontSize: 40, marginBottom: 10 }}>🌿</div>لا يوجد فيتامينات بعد</div>}
+          {(f.vitamins || []).map((v, i) => (
+            <div key={i} style={{ marginBottom: 14, background: G.card2, borderRadius: 12, padding: 14, border: `1px solid ${G.border}`, borderLeft: `3px solid ${G.green}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                <span style={{ color: G.green, fontWeight: 700, fontSize: 13 }}>🌿 فيتامين {i + 1}</span>
+                <button onClick={() => removeVit(i)} style={{ background: G.red + "22", border: "none", borderRadius: 6, color: G.red, cursor: "pointer", padding: "4px 10px", fontSize: 12 }}>✕ حذف</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8 }}>
+                <Inp label="اسم الفيتامين" value={v.name} onChange={e => updateVit(i, "name", e.target.value)} placeholder="Vitamin D3 / Omega 3" />
+                <Inp label="الجرعة" value={v.dose} onChange={e => updateVit(i, "dose", e.target.value)} placeholder="1000 IU" />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 8 }}>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: "block", marginBottom: 5, fontSize: 12, color: G.muted, fontWeight: 600 }}>⏰ التوقيت</label>
+                  <select value={v.timing} onChange={e => updateVit(i, "timing", e.target.value)} style={{ width: "100%", padding: "9px 13px", background: G.card, border: `1.5px solid ${G.border}`, borderRadius: 8, color: G.text, fontSize: 13 }}>
+                    <option value="">اختار</option>
+                    {["الصباح","على الريق","مع الأكل","قبل التمرين","بعد التمرين","قبل النوم","مرتين يومياً"].map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <Inp label="ملاحظة" value={v.notes} onChange={e => updateVit(i, "notes", e.target.value)} placeholder="مع أكل دسم..." />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "notes" && (
+        <div>
+          <label style={{ display: "block", marginBottom: 8, fontSize: 12, color: G.muted, fontWeight: 600 }}>ملاحظات خاصة بالعميل</label>
+          <textarea value={f.notes} onChange={e => setF(prev => ({ ...prev, notes: e.target.value }))} placeholder="مثال: ممنوع تمارين الضغط بسبب إصابة الكتف..."
+            style={{ width: "100%", minHeight: 160, padding: 12, background: G.card2, border: `1.5px solid ${G.border}`, borderRadius: 8, color: G.text, fontSize: 13, resize: "vertical" }} />
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 10, marginTop: 20, paddingTop: 16, borderTop: `1px solid ${G.border}` }}>
+        <Btn onClick={save} style={{ flex: 1 }}>💾 حفظ الملف</Btn>
+        <Btn onClick={onClose} v="ghost">إلغاء</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+// ── View-only client file ──────────────────────────────────────────────────────
+function ClientFileView({ file }) {
+  const [tab, setTab] = useState("workout");
+  if (!file) return (
+    <Card style={{ textAlign: "center", padding: 48 }}>
+      <div style={{ fontSize: 48, marginBottom: 12 }}>⏳</div>
+      <div style={{ color: G.muted, fontSize: 15 }}>مدربك لسه مبعتلكش برنامجك بعد.</div>
+    </Card>
+  );
+
+  const n = file.nutritionPlan;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+        {[["workout","🏋️ تماريني"],["nutrition","🥗 تغذيتي"],["supplements","💊 مكملاتي"],["vitamins","🌿 فيتاميناتي"],["notes","📝 ملاحظات"]].map(([id,lbl]) => (
+          <button key={id} onClick={() => setTab(id)} style={{ padding:"8px 14px",borderRadius:8,border:"none",background:tab===id?G.gold:G.card2,color:tab===id?"#000":G.muted,cursor:"pointer",fontWeight:700,fontSize:13 }}>{lbl}</button>
+        ))}
+      </div>
+
+      {tab === "workout" && (
+        <div className="fade">
+          {file.workoutDays.map(day => (
+            <Card key={day.day} style={{ marginBottom: 12, borderLeft: `3px solid ${TYPE_COLOR[day.type] || G.muted}` }}>
+              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:day.type!=="rest"?8:0 }}>
+                <div>
+                  <div style={{ fontWeight:700,fontSize:15 }}>{day.day}</div>
+                  {day.splitName && <div style={{ color:G.gold,fontSize:13,fontWeight:600,marginTop:2 }}>✦ {day.splitName}</div>}
+                </div>
+                <Badge color={TYPE_COLOR[day.type]||G.muted}>{day.type}</Badge>
+              </div>
+              {day.type==="rest" && <div style={{ color:G.muted,fontSize:13 }}>🛌 يوم راحة</div>}
+              {day.type!=="rest" && (() => {
+                const TC = { superset: G.blue, giantset: G.purple, dropset: G.orange };
+                const TL = { superset: "Super Set ⚡", giantset: "Giant Set 🔥", dropset: "Drop Set 📉" };
+                const seen = new Set();
+                const groups = [];
+                day.exercises.forEach((ex) => {
+                  if (ex.groupId && !seen.has(ex.groupId)) {
+                    seen.add(ex.groupId);
+                    const groupExs = day.exercises.filter(e => e.groupId === ex.groupId);
+                    groups.push({ type:"group", tech: ex.technique, groupExs, rest: groupExs[0].rest, sets: groupExs[0].sets });
+                  } else if (!ex.groupId) {
+                    groups.push({ type:"single", ex });
+                  }
+                });
+                return groups.map((grp, gi) => {
+                  if (grp.type === "single") {
+                    const ex = grp.ex;
+                    return (
+                      <div key={gi} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"9px 4px", borderBottom:`1px solid ${G.border}`, fontSize:14 }}>
+                        <span style={{ fontWeight:600 }}>{ex.name}</span>
+                        <div style={{ display:"flex", gap:5 }}>
+                          <Badge color={G.gold}>{ex.sets} × {ex.reps}</Badge>
+                          {ex.rest ? <Badge color={G.blue}>{ex.rest}s</Badge> : null}
+                        </div>
+                      </div>
+                    );
+                  } else {
+                    const col = TC[grp.tech] || G.purple;
+                    return (
+                      <div key={gi} style={{ margin:"10px 0", border:`2px solid ${col}55`, borderRadius:10, overflow:"hidden" }}>
+                        <div style={{ background:`${col}22`, padding:"8px 12px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                            <div style={{ width:4, height:18, background:col, borderRadius:2 }} />
+                            <span style={{ color:col, fontWeight:900, fontSize:13 }}>{TL[grp.tech]}</span>
+                          </div>
+                          <div style={{ display:"flex", gap:6 }}>
+                            <Badge color={G.gold}>{grp.sets} Sets</Badge>
+                            {grp.tech === "dropset"
+                              ? <Badge color={col}>⬇️ {grp.rest}kg drop</Badge>
+                              : <Badge color={G.blue}>⏱ {grp.rest}s rest</Badge>}
+                          </div>
+                        </div>
+                        {grp.groupExs.map((ex, ei) => (
+                          <div key={ei} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"9px 12px", borderBottom: ei < grp.groupExs.length-1 ? `1px dashed ${col}33` : "none", background: ei%2===0 ? col+"08" : "transparent" }}>
+                            <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+                              <div style={{ background:col, color:"#fff", borderRadius:"50%", width:22, height:22, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:900, flexShrink:0 }}>{ei+1}</div>
+                              <span style={{ fontWeight:600, fontSize:14 }}>{ex.name || "—"}</span>
+                            </div>
+                            <Badge color={G.green}>{ex.reps} Reps</Badge>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
+                });
+              })()}
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {tab === "nutrition" && (
+        <div className="fade">
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:12,marginBottom:20 }}>
+            {[["🔥",n.calories||"—","سعرات"],["💪",n.protein?n.protein+"g":"—","بروتين"],["🍞",n.carbs?n.carbs+"g":"—","كارب"],["🧈",n.fats?n.fats+"g":"—","دهون"]].map(([icon,val,lbl]) => (
+              <Card key={lbl} style={{ textAlign:"center" }}><div style={{ fontSize:28 }}>{icon}</div><div style={{ fontSize:22,fontWeight:900,color:G.gold }}>{val}</div><div style={{ color:G.muted,fontSize:12 }}>{lbl}</div></Card>
+            ))}
+          </div>
+          {n.meals.filter(Boolean).map((m,i) => (
+            <div key={i} style={{ display:"flex",alignItems:"center",gap:12,padding:"12px 16px",background:G.card2,borderRadius:10,marginBottom:8,border:`1px solid ${G.border}` }}>
+              <span style={{ background:G.gold+"22",color:G.gold,borderRadius:6,padding:"4px 10px",fontSize:11,fontWeight:700,flexShrink:0 }}>وجبة {i+1}</span>
+              <span style={{ fontSize:14 }}>{m}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "supplements" && (
+        <div className="fade">
+          {(!file.supplements||file.supplements.length===0) ? (
+            <Card style={{ textAlign:"center",padding:40 }}><div style={{ fontSize:40,marginBottom:10 }}>💊</div><div style={{ color:G.muted,fontSize:14 }}>لا يوجد مكملات</div></Card>
+          ) : (
+            ["قبل التمرين","أثناء التمرين","بعد التمرين","الصباح","على الريق","مع الأكل","قبل النوم",""].map(timing => {
+              const group = file.supplements.filter(s => (s.timing||"")=== timing);
+              if (!group.length) return null;
+              return (
+                <div key={timing||"other"} style={{ marginBottom:18 }}>
+                  <div style={{ fontSize:11,fontWeight:700,color:G.purple,letterSpacing:2,marginBottom:8 }}>⏰ {timing||"غير محدد"}</div>
+                  {group.map((s,i) => (
+                    <div key={i} style={{ display:"flex",alignItems:"flex-start",gap:14,padding:"13px 16px",background:G.card2,borderRadius:10,marginBottom:8,border:`1px solid ${G.border}`,borderLeft:`3px solid ${G.purple}` }}>
+                      <div style={{ fontSize:26,flexShrink:0 }}>💊</div>
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontWeight:700,fontSize:15,marginBottom:4 }}>{s.name||"—"}</div>
+                        <div style={{ display:"flex",gap:8,flexWrap:"wrap" }}>
+                          {s.dose && <Badge color={G.purple}>{s.dose}</Badge>}
+                          {s.timing && <Badge color={G.blue}>{s.timing}</Badge>}
+                        </div>
+                        {s.notes && <div style={{ marginTop:6,color:G.muted,fontSize:12 }}>📌 {s.notes}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {tab === "vitamins" && (
+        <div className="fade">
+          {(!file.vitamins||file.vitamins.length===0) ? (
+            <Card style={{ textAlign:"center",padding:40 }}><div style={{ fontSize:40,marginBottom:10 }}>🌿</div><div style={{ color:G.muted,fontSize:14 }}>لا يوجد فيتامينات</div></Card>
+          ) : (
+            ["الصباح","على الريق","مع الأكل","قبل التمرين","بعد التمرين","قبل النوم","مرتين يومياً",""].map(timing => {
+              const group = file.vitamins.filter(v => (v.timing||"")=== timing);
+              if (!group.length) return null;
+              return (
+                <div key={timing||"other"} style={{ marginBottom:18 }}>
+                  <div style={{ fontSize:11,fontWeight:700,color:G.green,letterSpacing:2,marginBottom:8 }}>⏰ {timing||"غير محدد"}</div>
+                  {group.map((v,i) => (
+                    <div key={i} style={{ display:"flex",alignItems:"flex-start",gap:14,padding:"13px 16px",background:G.card2,borderRadius:10,marginBottom:8,border:`1px solid ${G.border}`,borderLeft:`3px solid ${G.green}` }}>
+                      <div style={{ fontSize:26,flexShrink:0 }}>🌿</div>
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontWeight:700,fontSize:15,marginBottom:4 }}>{v.name||"—"}</div>
+                        <div style={{ display:"flex",gap:8,flexWrap:"wrap" }}>
+                          {v.dose && <Badge color={G.green}>{v.dose}</Badge>}
+                          {v.timing && <Badge color={G.blue}>{v.timing}</Badge>}
+                        </div>
+                        {v.notes && <div style={{ marginTop:6,color:G.muted,fontSize:12 }}>📌 {v.notes}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {tab === "notes" && (
+        <div className="fade">
+          <Card>
+            <h3 style={{ color:G.gold,marginBottom:12 }}>📝 ملاحظات مدربك</h3>
+            {file.notes ? <p style={{ color:G.text,lineHeight:1.8,fontSize:14 }}>{file.notes}</p> : <p style={{ color:G.muted }}>لا توجد ملاحظات</p>}
+          </Card>
+        </div>
+      )}
+
+      <div style={{ marginTop:12,color:G.muted,fontSize:11 }}>آخر تحديث: {file.updatedAt||"—"}</div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRAINER DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+function TrainerDashboard({ data, setData, user, onLogout }) {
+  const [tab, setTab] = useState("clients");
+  const [editingClient, setEditingClient] = useState(null);
+  const [renewingClient, setRenewingClient] = useState(null);
+  const [addModal, setAddModal] = useState(false);
+  const [schedModal, setSchedModal] = useState(false);
+  const [newClient, setNC] = useState({ name:"",username:"",email:"",password:"",phone:"",age:"",weight:"",height:"",goal:"",startDate:today(),endDate:"",subDays:"30" });
+  const [newSched, setNS] = useState({ title:"",day:"الأحد",time:"08:00",duration:60,capacity:15,type:"strength" });
+  const [clientErr, setClientErr] = useState("");
+  const [resetPwClient, setResetPwClient] = useState(null);
+  const [addingAuth, setAddingAuth] = useState(false); // حالة إنشاء Auth account
+
+  const resetClientPassword = (clientId, newPass) => {
+    setData(d => ({ ...d, users: d.users.map(u => u.id === clientId ? { ...u, password: newPass } : u) }));
+  };
+
+  const myClients = data.users.filter(u => u.role === "client" && u.trainerId === user.id);
+  const mySchedules = data.schedules.filter(s => s.trainerId === user.id);
+
+  const calcEnd = (start, days) => {
+    const d = new Date(start); d.setDate(d.getDate() + +days);
+    return d.toISOString().split("T")[0];
+  };
+
+  const expiredClients   = myClients.filter(c => subStatus(c).status === "expired");
+  const warningClients   = myClients.filter(c => subStatus(c).status === "warning");
+
+  const openAddModal = () => {
+    setClientErr("");
+    const start = today();
+    const end = calcEnd(start, 30);
+    setNC({ name:"",username:"",email:"",password:"",phone:"",age:"",weight:"",height:"",goal:"",startDate:start,endDate:end,subDays:"30" });
+    setAddModal(true);
+  };
+
+  const addClient = async () => {
+    setClientErr("");
+    const uname = sanitize(newClient.username);
+    const name  = sanitize(newClient.name);
+    const emailVal = sanitize(newClient.email).toLowerCase();
+
+    const errs = [
+      validate.name(name),
+      validate.username(uname),
+      validate.password(newClient.password),
+      validate.phone(newClient.phone),
+      validate.age(newClient.age),
+      validate.weight(newClient.weight),
+      validate.height(newClient.height),
+    ].filter(Boolean);
+    if (errs.length) { setClientErr("❌ " + errs[0]); return; }
+    if (emailVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) {
+      setClientErr("❌ الإيميل غير صحيح"); return;
+    }
+
+    const exists = data.users.find(u => u.username.toLowerCase() === uname.toLowerCase());
+    if (exists) { setClientErr("❌ اسم المستخدم موجود بالفعل"); return; }
+
+    const hashed = await storePassword(newClient.password);
+    const newId = uid();
+    let authId = null;
+
+    // إنشاء حساب في Supabase Auth لو فيه إيميل
+    if (emailVal) {
+      setAddingAuth(true);
+      const authRes = await Auth.adminCreateUser(emailVal, newClient.password);
+      setAddingAuth(false);
+      if (authRes.error) {
+        setClientErr("⚠️ " + authRes.error + " — الحساب هيتضاف بدون Auth");
+      } else {
+        authId = authRes.user?.id || null;
+      }
+    }
+
+    const c = {
+      id: newId, role: "client", trainerId: user.id,
+      name, username: uname, password: hashed,
+      email: emailVal || null,
+      auth_id: authId,
+      phone: sanitize(newClient.phone),
+      age:    sanitizeNum(newClient.age, 5, 100),
+      weight: sanitizeNum(newClient.weight, 20, 300),
+      height: sanitizeNum(newClient.height, 100, 250),
+      goal: sanitize(newClient.goal), avatar: "👤",
+      joinedAt: today(),
+      startDate: newClient.startDate,
+      endDate: newClient.endDate || calcEnd(newClient.startDate, newClient.subDays),
+    };
+    setData(d => ({ ...d, users: [...d.users, c], clientFiles: { ...d.clientFiles, [newId]: null } }));
+    setAddModal(false);
+    setClientErr("");
+  };
+
+  const removeClient = id => setData(d => {
+    const files = { ...d.clientFiles }; delete files[id];
+    return { ...d, users: d.users.filter(u => u.id !== id), clientFiles: files };
+  });
+
+  const saveFile = async (clientId, file) => {
+    // احذف الملفات القديمة وأضف الجديد
+    try {
+      // URL encoding صحيح للـ quoted column name
+      await supa(`client_files?clientId=eq.${encodeURIComponent(clientId)}`, { method: "DELETE", prefer: "return=minimal" });
+      await DB.addClientFile(clientId, "full_profile", file);
+    } catch(e) { console.error("saveFile error", e); }
+    setData(d => ({ ...d, clientFiles: { ...d.clientFiles, [clientId]: { ...file } } }));
+    setEditingClient(null);
+  };
+
+  const renewSub = (clientId, startDate, endDate, discount = 0) => {
+    setData(d => ({ ...d, users: d.users.map(u => u.id === clientId ? { ...u, startDate, endDate, lastDiscountPct: discount || null } : u) }));
+    setRenewingClient(null);
+  };
+
+  const addSched = () => {
+    if (!newSched.title) return;
+    setData(d => ({ ...d, schedules: [...d.schedules, { id:uid(),trainerId:user.id,trainerName:user.name,...newSched }] }));
+    setSchedModal(false); setNS({ title:"",day:"الأحد",time:"08:00",duration:60,capacity:15,type:"strength" });
+  };
+  const removeSched = id => setData(d => ({ ...d, schedules: d.schedules.filter(s => s.id !== id) }));
+
+  const tabs = [
+    { id:"clients",   label:"عملائي",      icon:"👥" },
+    { id:"schedules", label:"جداول الحصص", icon:"📅" },
+    { id:"overview",  label:"ملخص",         icon:"📊" },
+  ];
+
+  return (
+    <div style={{ display:"flex",minHeight:"100vh" }}>
+      <Sidebar tabs={tabs} active={tab} setActive={setTab} user={user} role="trainer" onLogout={onLogout} />
+      <div style={{ flex:1,overflow:"auto",padding:28 }}>
+
+        {(expiredClients.length > 0 || warningClients.length > 0) && tab === "clients" && (
+          <div style={{ marginBottom:18 }}>
+            {expiredClients.length > 0 && (
+              <div style={{ background:G.red+"18",border:`1px solid ${G.red}44`,borderRadius:10,padding:"12px 16px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+                <span style={{ color:G.red,fontWeight:700,fontSize:13 }}>⚠️ {expiredClients.length} عميل اشتراكه انتهى: {expiredClients.map(c=>c.name).join("، ")}</span>
+              </div>
+            )}
+            {warningClients.length > 0 && (
+              <div style={{ background:G.orange+"18",border:`1px solid ${G.orange}55`,borderRadius:10,padding:"12px 16px" }}>
+                <div style={{ color:G.orange,fontWeight:700,fontSize:13,marginBottom:4 }}>🔔 {warningClients.length} عميل اشتراكه هينتهي خلال 5 أيام</div>
+                <div style={{ color:G.muted,fontSize:12,marginBottom:6 }}>{warningClients.map(c=>`${c.name} (${subStatus(c).daysLeft} ${subStatus(c).daysLeft===1?"يوم":"أيام"})`).join("، ")}</div>
+                <div style={{ background:G.orange+"20",borderRadius:7,padding:"7px 12px",fontSize:12,color:G.orange,fontWeight:700 }}>
+                  🎉 لو جددوا دلوقتي هياخدوا خصم 10% — اضغط تجديد على أي عميل!
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "clients" && (
+          <div className="fade">
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22 }}>
+              <h2 style={{ fontSize:24,fontWeight:900,color:G.gold }}>👥 عملائي</h2>
+              <Btn onClick={openAddModal}>+ إضافة عميل</Btn>
+            </div>
+            {myClients.length === 0 && (
+              <Card style={{ textAlign:"center",padding:50 }}>
+                <div style={{ fontSize:48 }}>👥</div>
+                <div style={{ color:G.muted,marginTop:12 }}>لا يوجد عملاء بعد</div>
+              </Card>
+            )}
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16 }}>
+              {myClients.map(c => {
+                const hasFile = !!(data.clientFiles?.[c.id]);
+                const sub = subStatus(c);
+                const borderColor = sub.status === "expired" ? G.red : sub.status === "warning" ? G.orange : sub.status === "active" ? G.green : G.muted;
+                return (
+                  <Card key={c.id} style={{ borderTop:`3px solid ${borderColor}` }}>
+                    <div style={{ display:"flex",justifyContent:"space-between",marginBottom:12 }}>
+                      <div style={{ display:"flex",gap:11 }}>
+                        <div style={{ width:46,height:46,background:G.green+"1a",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20 }}>👤</div>
+                        <div>
+                          <div style={{ fontWeight:700,fontSize:15 }}>{c.name}</div>
+                          <div style={{ color:G.muted,fontSize:12 }}>@{c.username}</div>
+                        </div>
+                      </div>
+                      <button onClick={() => removeClient(c.id)} style={{ background:"none",border:"none",color:G.red,cursor:"pointer",fontSize:18 }}>🗑</button>
+                    </div>
+                    <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:12,color:G.muted,marginBottom:10 }}>
+                      {c.phone  && <span>📞 {c.phone}</span>}
+                      {c.age    && <span>🎂 {c.age} سنة</span>}
+                      {c.weight && <span>⚖️ {c.weight} kg</span>}
+                      {c.height && <span>📏 {c.height} cm</span>}
+                      {c.goal   && <span style={{ gridColumn:"span 2" }}>🎯 {c.goal}</span>}
+                    </div>
+                    <SubBar client={c} />
+                    <div style={{ display:"flex",gap:8,alignItems:"center",marginTop:12 }}>
+                      <Btn onClick={() => setEditingClient(c)} style={{ flex:1,fontSize:12 }}>
+                        {hasFile ? "✏️ تعديل الملف" : "📁 إنشاء الملف"}
+                      </Btn>
+                      <Btn onClick={() => setRenewingClient(c)} v="outline" style={{ fontSize:12,padding:"9px 12px" }}>
+                        {sub.discount ? "🎉 تجديد -10%" : "🔄 تجديد"}
+                      </Btn>
+                      <Btn onClick={() => setResetPwClient(c)} v="ghost" style={{ fontSize:12,padding:"9px 12px" }} title="تغيير الباسورد">🔑</Btn>
+                    </div>
+                    <div style={{ marginTop:10,padding:"8px 10px",background:G.card2,borderRadius:8,fontSize:11,color:G.muted,display:"flex",gap:12 }}>
+                      <span>👤 <strong style={{ color:G.text }}>{c.username}</strong></span>
+                      <span>🔑 <strong style={{ color:G.text }}>••••••••</strong></span>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab === "schedules" && (
+          <div className="fade">
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22 }}>
+              <h2 style={{ fontSize:24,fontWeight:900,color:G.gold }}>📅 جداول الحصص</h2>
+              <Btn onClick={() => setSchedModal(true)}>+ إضافة حصة</Btn>
+            </div>
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:14 }}>
+              {mySchedules.map(s => (
+                <Card key={s.id} style={{ borderLeft:`3px solid ${TYPE_COLOR[s.type]||G.gold}` }}>
+                  <div style={{ display:"flex",justifyContent:"space-between",marginBottom:8 }}>
+                    <div style={{ fontWeight:700 }}>{s.title}</div>
+                    <button onClick={() => removeSched(s.id)} style={{ background:"none",border:"none",color:G.red,cursor:"pointer" }}>🗑</button>
+                  </div>
+                  <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+                    <Badge color={TYPE_COLOR[s.type]||G.gold}>{s.type}</Badge>
+                    <Badge color={G.muted}>📅 {s.day}</Badge>
+                    <Badge color={G.muted}>⏰ {s.time}</Badge>
+                    <Badge color={G.muted}>⌛ {s.duration}د</Badge>
+                    <Badge color={G.green}>👥 {s.capacity}</Badge>
+                  </div>
+                </Card>
+              ))}
+              {mySchedules.length===0 && <Card style={{ textAlign:"center",padding:40,color:G.muted }}>لا توجد حصص بعد</Card>}
+            </div>
+          </div>
+        )}
+
+        {tab === "overview" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>📊 ملخص</h2>
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:14,marginBottom:24 }}>
+              {[
+                ["👥",myClients.length,"عملاء",G.gold],
+                ["✅",myClients.filter(c=>subStatus(c).status==="active").length,"اشتراك نشط",G.green],
+                ["⚠️",expiredClients.length,"منتهي",G.red],
+                ["🔔",warningClients.length,"قرب الانتهاء",G.orange],
+                ["📅",mySchedules.length,"حصص",G.blue],
+              ].map(([ic,v,l,col]) => (
+                <Card key={l} style={{ textAlign:"center",borderTop:`3px solid ${col}` }}>
+                  <div style={{ fontSize:26 }}>{ic}</div>
+                  <div style={{ fontSize:28,fontWeight:900,color:col }}>{v}</div>
+                  <div style={{ color:G.muted,fontSize:12 }}>{l}</div>
+                </Card>
+              ))}
+            </div>
+            <Card>
+              <h3 style={{ color:G.gold,marginBottom:14 }}>حالة الاشتراكات</h3>
+              {myClients.map(c => {
+                const sub = subStatus(c);
+                return (
+                  <div key={c.id} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:`1px solid ${G.border}` }}>
+                    <div style={{ fontWeight:600 }}>👤 {c.name}</div>
+                    <div style={{ display:"flex",gap:8,alignItems:"center" }}>
+                      <Badge color={sub.color}>
+                        {sub.status==="expired"?"منتهي ⚠️":sub.status==="warning"?`⏰ ${sub.label} متبقي`:sub.status==="active"?`✓ ${sub.label} متبقي`:"بدون اشتراك"}
+                      </Badge>
+                      {c.endDate && <span style={{ color:G.muted,fontSize:11 }}>حتى {c.endDate}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </Card>
+          </div>
+        )}
+      </div>
+
+      {addModal && (
+        <Modal title="إضافة عميل جديد" onClose={() => { setAddModal(false); setClientErr(""); }}>
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
+            <Inp label="الاسم الكامل *"  value={newClient.name}     onChange={e => { setNC({...newClient,name:e.target.value});setClientErr(""); }} />
+            <Inp label="التليفون"         value={newClient.phone}    onChange={e => setNC({...newClient,phone:e.target.value})} />
+            <Inp label="العمر"            type="number" value={newClient.age}    onChange={e => setNC({...newClient,age:e.target.value})} />
+            <Inp label="الوزن (kg)"       type="number" value={newClient.weight} onChange={e => setNC({...newClient,weight:e.target.value})} />
+            <Inp label="الطول (cm)"       type="number" value={newClient.height} onChange={e => setNC({...newClient,height:e.target.value})} />
+            <Inp label="الهدف"            value={newClient.goal}     onChange={e => setNC({...newClient,goal:e.target.value})} placeholder="تخسيس / تضخيم..." />
+          </div>
+          <div style={{ background:G.card2, borderRadius:10, padding:"12px 14px", marginBottom:12, border:`1px solid ${G.blue}44` }}>
+            <div style={{ fontSize:12, color:G.blue, fontWeight:700, marginBottom:10 }}>🔐 بيانات الدخول</div>
+            <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
+              <Inp label="اسم المستخدم *"  value={newClient.username} onChange={e => { setNC({...newClient,username:e.target.value});setClientErr(""); }} />
+              <Inp label="الباسورد *"       type="password" value={newClient.password} onChange={e => { setNC({...newClient,password:e.target.value});setClientErr(""); }} />
+            </div>
+            <Inp label="📧 الإيميل (اختياري — للدخول عبر Supabase Auth)" type="email" value={newClient.email} onChange={e => { setNC({...newClient,email:e.target.value});setClientErr(""); }} placeholder="example@gmail.com" />
+            {newClient.email && <div style={{ fontSize:11, color:G.blue, marginTop:-6, marginBottom:4 }}>⚡ هيتعمل حساب Auth بالإيميل — العميل يقدر يدخل بيه</div>}
+          </div>
+          <div style={{ background:G.card2,border:`1px solid ${G.gold}33`,borderRadius:10,padding:"14px 14px 8px",marginBottom:12 }}>
+            <div style={{ color:G.gold,fontWeight:700,fontSize:12,marginBottom:10 }}>📅 بيانات الاشتراك</div>
+            <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
+              <Inp label="تاريخ البداية" type="date" value={newClient.startDate}
+                onChange={e => { const s=e.target.value; setNC({...newClient,startDate:s,endDate:calcEnd(s,newClient.subDays)}); }} />
+              <div style={{ marginBottom:12 }}>
+                <label style={{ display:"block",marginBottom:5,fontSize:12,color:G.muted,fontWeight:600 }}>مدة الاشتراك</label>
+                <select value={newClient.subDays}
+                  onChange={e => { const d=e.target.value; setNC({...newClient,subDays:d,endDate:calcEnd(newClient.startDate,d)}); }}
+                  style={{ width:"100%",padding:"9px 13px",background:G.card,border:`1.5px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13 }}>
+                  <option value="30">شهر (30 يوم)</option>
+                  <option value="90">3 أشهر (90 يوم)</option>
+                  <option value="180">6 أشهر (180 يوم)</option>
+                  <option value="365">سنة (365 يوم)</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ background:G.card,borderRadius:8,padding:"10px 12px",fontSize:12,display:"flex",justifyContent:"space-between" }}>
+              <span style={{ color:G.muted }}>تاريخ الانتهاء</span>
+              <span style={{ color:G.gold,fontWeight:700 }}>📅 {newClient.endDate||"—"}</span>
+            </div>
+          </div>
+          {clientErr && (
+            <div style={{ background:G.red+"18",border:`1px solid ${G.red}44`,borderRadius:8,padding:"10px 14px",marginBottom:12,color:G.red,fontSize:13,fontWeight:600 }}>{clientErr}</div>
+          )}
+          <Btn onClick={addClient} style={{ width:"100%",marginTop:6 }} disabled={addingAuth}>{addingAuth ? "⏳ جاري إنشاء حساب Auth..." : "✅ إضافة العميل"}</Btn>
+        </Modal>
+      )}
+
+      {schedModal && (
+        <Modal title="إضافة حصة جديدة" onClose={() => setSchedModal(false)}>
+          <Inp label="اسم الحصة" value={newSched.title} onChange={e => setNS({...newSched,title:e.target.value})} />
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
+            <Sel label="اليوم" value={newSched.day} onChange={e => setNS({...newSched,day:e.target.value})}>{DAYS_AR.map(d=><option key={d}>{d}</option>)}</Sel>
+            <Sel label="النوع" value={newSched.type} onChange={e => setNS({...newSched,type:e.target.value})}>
+              {["strength","cardio","hiit","yoga","flexibility"].map(t=><option key={t}>{t}</option>)}
+            </Sel>
+            <Inp label="الوقت" type="time" value={newSched.time} onChange={e => setNS({...newSched,time:e.target.value})} />
+            <Inp label="المدة (دقيقة)" type="number" value={newSched.duration} onChange={e => setNS({...newSched,duration:+e.target.value})} />
+            <Inp label="السعة" type="number" value={newSched.capacity} onChange={e => setNS({...newSched,capacity:+e.target.value})} />
+          </div>
+          <Btn onClick={addSched} style={{ width:"100%",marginTop:6 }}>إضافة الحصة</Btn>
+        </Modal>
+      )}
+
+      {renewingClient && (
+        <RenewModal client={renewingClient} onSave={(s,e,disc) => renewSub(renewingClient.id,s,e,disc)} onClose={() => setRenewingClient(null)} />
+      )}
+
+      {editingClient && (
+        <ClientFileEditor client={editingClient} file={data.clientFiles?.[editingClient.id]||null} onSave={f => saveFile(editingClient.id,f)} onClose={() => setEditingClient(null)} />
+      )}
+      {resetPwClient && (
+        <ResetPasswordModal target={resetPwClient} onSave={resetClientPassword} onClose={() => setResetPwClient(null)} />
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OWNER DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+function OwnerDashboard({ data, setData, user, onLogout }) {
+  const [tab, setTab] = useState("overview");
+  const [addTrainer, setAddTrainer] = useState(false);
+  const [nt, setNT] = useState({ name:"",username:"",email:"",password:"",specialty:"" });
+  const [addingTrainerAuth, setAddingTrainerAuth] = useState(false);
+  const [changePwModal, setChangePwModal] = useState(false);
+  const [resetPwTarget, setResetPwTarget] = useState(null);
+
+  const saveMyPassword = (newPass) => {
+    setData(d => ({ ...d, users: d.users.map(u => u.id === user.id ? { ...u, password: newPass } : u) }));
+  };
+
+  const resetAnyPassword = (targetId, newPass) => {
+    setData(d => ({ ...d, users: d.users.map(u => u.id === targetId ? { ...u, password: newPass } : u) }));
+  };
+
+  const trainers = data.users.filter(u => u.role === "trainer");
+  const clients  = data.users.filter(u => u.role === "client");
+  const expiredAll = clients.filter(c => subStatus(c).status === "expired");
+  const warningAll = clients.filter(c => subStatus(c).status === "warning");
+
+  const addT = async () => {
+    if (!nt.name||!nt.username||!nt.password) return;
+    const ve = validate.password(nt.password);
+    if (ve) { alert("❌ " + ve); return; }
+    const exists = data.users.find(u => u.username.toLowerCase() === nt.username.toLowerCase());
+    if (exists) { alert("❌ اسم المستخدم موجود بالفعل"); return; }
+    const emailVal = sanitize(nt.email).toLowerCase();
+    if (emailVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) { alert("❌ الإيميل غير صحيح"); return; }
+
+    const hashed = await storePassword(nt.password);
+    let authId = null;
+    if (emailVal) {
+      setAddingTrainerAuth(true);
+      const authRes = await Auth.adminCreateUser(emailVal, nt.password);
+      setAddingTrainerAuth(false);
+      if (authRes.error) { alert("⚠️ " + authRes.error + " — المدرب هيتضاف بدون Auth"); }
+      else { authId = authRes.user?.id || null; }
+    }
+
+    const newTrainer = { id:uid(), role:"trainer", avatar:"💪", name:sanitize(nt.name), username:sanitize(nt.username), password:hashed, email: emailVal||null, auth_id:authId, specialty:sanitize(nt.specialty||"") };
+    setData(d => ({ ...d, users: [...d.users, newTrainer] }));
+    setAddTrainer(false); setNT({ name:"",username:"",email:"",password:"",specialty:"" });
+  };
+  const removeT = id => setData(d => ({ ...d, users: d.users.filter(u => u.id!==id) }));
+
+  const tabs = [
+    { id:"overview",  label:"الرئيسية",     icon:"📊" },
+    { id:"trainers",  label:"المدربين",      icon:"💪" },
+    { id:"clients",   label:"كل العملاء",    icon:"👥" },
+    { id:"schedules", label:"كل الجداول",    icon:"📅" },
+    { id:"files",     label:"ملفات العملاء", icon:"📁" },
+    { id:"settings",  label:"الإعدادات",     icon:"⚙️" },
+  ];
+
+  return (
+    <div style={{ display:"flex",minHeight:"100vh" }}>
+      <Sidebar tabs={tabs} active={tab} setActive={setTab} user={user} role="owner" onLogout={onLogout} />
+      <div style={{ flex:1,overflow:"auto",padding:28 }}>
+
+        {tab === "overview" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>مرحباً بك 👑</h2>
+            {(expiredAll.length > 0 || warningAll.length > 0) && (
+              <div style={{ marginBottom:18 }}>
+                {expiredAll.length > 0 && (
+                  <div style={{ background:G.red+"18",border:`1px solid ${G.red}44`,borderRadius:10,padding:"12px 16px",marginBottom:8 }}>
+                    <div style={{ color:G.red,fontWeight:700,fontSize:13 }}>⚠️ {expiredAll.length} عميل اشتراكه انتهى — يحتاج تجديد عاجل</div>
+                    <div style={{ color:G.muted,fontSize:12,marginTop:4 }}>{expiredAll.map(c=>c.name).join("، ")}</div>
+                  </div>
+                )}
+                {warningAll.length > 0 && (
+                  <div style={{ background:G.orange+"18",border:`1px solid ${G.orange}55`,borderRadius:10,padding:"12px 16px" }}>
+                    <div style={{ color:G.orange,fontWeight:700,fontSize:13 }}>🔔 {warningAll.length} عميل اشتراكه هينتهي خلال 5 أيام — مؤهلين لخصم 10%</div>
+                    <div style={{ color:G.muted,fontSize:12,marginTop:4 }}>{warningAll.map(c=>`${c.name} (${subStatus(c).daysLeft} أيام)`).join("، ")}</div>
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:14,marginBottom:24 }}>
+              {[
+                ["💪",trainers.length,"مدربين",G.gold],
+                ["👥",clients.length,"عملاء",G.green],
+                ["✅",clients.filter(c=>subStatus(c).status==="active").length,"نشط",G.green],
+                ["⚠️",expiredAll.length,"منتهي",G.red],
+                ["📅",data.schedules.length,"حصص",G.blue],
+              ].map(([ic,v,l,col]) => (
+                <Card key={l} style={{ textAlign:"center",borderTop:`3px solid ${col}` }}>
+                  <div style={{ fontSize:26 }}>{ic}</div>
+                  <div style={{ fontSize:26,fontWeight:900,color:col }}>{v}</div>
+                  <div style={{ color:G.muted,fontSize:12 }}>{l}</div>
+                </Card>
+              ))}
+            </div>
+            <Card>
+              <h3 style={{ color:G.gold,marginBottom:14 }}>📅 الجداول الأخيرة</h3>
+              {data.schedules.slice(0,5).map(s => (
+                <div key={s.id} style={{ display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${G.border}`,fontSize:14 }}>
+                  <div><span style={{ fontWeight:600 }}>{s.title}</span> <span style={{ color:G.muted,fontSize:12 }}>— {s.trainerName}</span></div>
+                  <Badge>{s.day} {s.time}</Badge>
+                </div>
+              ))}
+            </Card>
+          </div>
+        )}
+
+        {tab === "trainers" && (
+          <div className="fade">
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22 }}>
+              <h2 style={{ fontSize:24,fontWeight:900,color:G.gold }}>💪 المدربين</h2>
+              <Btn onClick={() => setAddTrainer(true)}>+ إضافة مدرب</Btn>
+            </div>
+            <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14 }}>
+              {trainers.map(t => {
+                const tClients = clients.filter(c => c.trainerId === t.id);
+                const tExpired = tClients.filter(c => subStatus(c).status === "expired");
+                return (
+                  <Card key={t.id}>
+                    <div style={{ display:"flex",gap:12,marginBottom:12 }}>
+                      <div style={{ width:50,height:50,background:G.gold+"1a",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24 }}>{t.avatar}</div>
+                      <div><div style={{ fontWeight:700 }}>{t.name}</div><div style={{ color:G.muted,fontSize:12 }}>{t.specialty}</div><Badge color={G.blue}>Trainer</Badge></div>
+                    </div>
+                    <div style={{ fontSize:12,color:G.muted,marginBottom:10 }}>👤 {t.username} • 🔑 {t.password}</div>
+                    <div style={{ display:"flex",gap:8 }}>
+                      <div style={{ flex:1,textAlign:"center",background:G.card2,borderRadius:8,padding:8 }}><div style={{ color:G.gold,fontWeight:700 }}>{tClients.length}</div><div style={{ color:G.muted,fontSize:11 }}>عملاء</div></div>
+                      <div style={{ flex:1,textAlign:"center",background:G.card2,borderRadius:8,padding:8 }}><div style={{ color:G.red,fontWeight:700 }}>{tExpired.length}</div><div style={{ color:G.muted,fontSize:11 }}>منتهي</div></div>
+                      <button onClick={() => setResetPwTarget(t)} style={{ background:G.blue+"1a",border:"none",borderRadius:8,color:G.blue,cursor:"pointer",padding:"0 12px",fontSize:16 }} title="تغيير الباسورد">🔑</button>
+                      <button onClick={() => removeT(t.id)} style={{ background:G.red+"1a",border:"none",borderRadius:8,color:G.red,cursor:"pointer",padding:"0 14px" }}>🗑</button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab === "clients" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>👥 كل العملاء ({clients.length})</h2>
+            {clients.length===0 ? <Card style={{ textAlign:"center",padding:50,color:G.muted }}>لا يوجد عملاء بعد</Card> : (
+              <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:14 }}>
+                {clients.map(c => {
+                  const trainer = data.users.find(u => u.id === c.trainerId);
+                  const sub = subStatus(c);
+                  return (
+                    <Card key={c.id} style={{ borderTop:`3px solid ${sub.color}` }}>
+                      <div style={{ fontWeight:700,marginBottom:4 }}>{c.name}</div>
+                      <div style={{ color:G.muted,fontSize:12,marginBottom:8 }}>🏋️ {trainer?.name} • 📅 {c.joinedAt}</div>
+                      <div style={{ fontSize:12,display:"flex",gap:8,flexWrap:"wrap",marginBottom:8 }}>
+                        {c.goal && <Badge color={G.gold}>{c.goal}</Badge>}
+                        <Badge color={sub.color}>{sub.status==="expired"?"منتهي ⚠️":sub.status==="warning"?`⏰ ${sub.label} متبقي`:sub.status==="active"?`✓ ${sub.label} متبقي`:"بدون"}</Badge>
+                      </div>
+                      <SubBar client={c} />
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "schedules" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>📅 كل الجداول</h2>
+            {DAYS_AR.map(day => {
+              const ds = data.schedules.filter(s => s.day === day);
+              if (!ds.length) return null;
+              return (
+                <div key={day} style={{ marginBottom:18 }}>
+                  <h3 style={{ color:G.muted,fontSize:12,letterSpacing:2,marginBottom:10 }}>{day}</h3>
+                  <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:10 }}>
+                    {ds.map(s => (
+                      <Card key={s.id} style={{ borderLeft:`3px solid ${TYPE_COLOR[s.type]||G.gold}` }}>
+                        <div style={{ fontWeight:700,marginBottom:4 }}>{s.title}</div>
+                        <div style={{ color:G.muted,fontSize:12,marginBottom:8 }}>💪 {s.trainerName}</div>
+                        <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+                          <Badge color={TYPE_COLOR[s.type]||G.gold}>{s.type}</Badge>
+                          <Badge color={G.muted}>⏰ {s.time}</Badge>
+                          <Badge color={G.muted}>{s.duration}د</Badge>
+                          <Badge color={G.green}>👥 {s.capacity}</Badge>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {tab === "settings" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>⚙️ الإعدادات</h2>
+            <Card style={{ maxWidth:460 }}>
+              <h3 style={{ color:G.text,marginBottom:16,fontSize:16 }}>👑 حسابك</h3>
+              <div style={{ display:"flex",gap:12,alignItems:"center",marginBottom:20 }}>
+                <div style={{ width:52,height:52,background:G.gold+"1a",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26 }}>👑</div>
+                <div>
+                  <div style={{ fontWeight:700,fontSize:15 }}>{user.name}</div>
+                  <div style={{ color:G.muted,fontSize:12 }}>@{user.username}</div>
+                  <Badge color={G.gold}>OWNER</Badge>
+                </div>
+              </div>
+              <Btn onClick={() => setChangePwModal(true)} v="outline" style={{ width:"100%" }}>🔑 تغيير الباسورد</Btn>
+            </Card>
+          </div>
+        )}
+
+        {tab === "files" && (
+          <div className="fade">
+            <h2 style={{ fontSize:24,fontWeight:900,color:G.gold,marginBottom:22 }}>📁 ملفات العملاء</h2>
+            {trainers.map(t => {
+              const tClients = clients.filter(c => c.trainerId === t.id);
+              if (!tClients.length) return null;
+              return (
+                <div key={t.id} style={{ marginBottom:24 }}>
+                  <h3 style={{ color:G.text,marginBottom:12,display:"flex",alignItems:"center",gap:8 }}>
+                    <span>{t.avatar}</span>{t.name}<span style={{ color:G.muted,fontWeight:400,fontSize:13 }}>({tClients.length} عملاء)</span>
+                  </h3>
+                  <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:10 }}>
+                    {tClients.map(c => {
+                      const f = data.clientFiles?.[c.id];
+                      const sub = subStatus(c);
+                      return (
+                        <Card key={c.id} style={{ borderLeft:`3px solid ${f?G.green:G.muted}` }}>
+                          <div style={{ fontWeight:600,marginBottom:4 }}>👤 {c.name}</div>
+                          {f ? (
+                            <div style={{ fontSize:12,color:G.muted }}>
+                              <div>🏋️ {f.workoutDays?.filter(d=>d.type!=="rest").length||0} أيام تمرين</div>
+                              <div>🔥 {f.nutritionPlan?.calories||"—"} kcal/يوم</div>
+                              <div>📅 آخر تحديث: {f.updatedAt}</div>
+                            </div>
+                          ) : <div style={{ color:G.muted,fontSize:12 }}>لا يوجد ملف بعد</div>}
+                          <div style={{ marginTop:8,display:"flex",gap:6,flexWrap:"wrap" }}>
+                            <Badge color={f?G.green:G.muted}>{f?"✓ جاهز":"⏳ منتظر"}</Badge>
+                            <Badge color={sub.color}>{sub.status==="expired"?"منتهي ⚠️":sub.status==="active"?`✓ ${sub.label}`:sub.status==="warning"?`⏰ ${sub.label}`:"بدون"}</Badge>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {addTrainer && (
+        <Modal title="إضافة مدرب جديد" onClose={() => setAddTrainer(false)}>
+          <Inp label="الاسم الكامل *"  value={nt.name}      onChange={e => setNT({...nt,name:e.target.value})} />
+          <Inp label="التخصص"          value={nt.specialty} onChange={e => setNT({...nt,specialty:e.target.value})} placeholder="Strength / Cardio..." />
+          <div style={{ background:G.card2, borderRadius:10, padding:"12px 14px", marginBottom:12, border:`1px solid ${G.blue}44` }}>
+            <div style={{ fontSize:12, color:G.blue, fontWeight:700, marginBottom:10 }}>🔐 بيانات الدخول</div>
+            <Inp label="اسم المستخدم * (إنجليزي وأرقام فقط)" value={nt.username} onChange={e => setNT({...nt,username:e.target.value})} placeholder="trainer_name" />
+            <Inp label="الباسورد * (6 أحرف على الأقل)" type="password" value={nt.password} onChange={e => setNT({...nt,password:e.target.value})} placeholder="••••••••" />
+            <Inp label="📧 الإيميل (اختياري — للدخول عبر Supabase Auth)" type="email" value={nt.email} onChange={e => setNT({...nt,email:e.target.value})} placeholder="trainer@gmail.com" />
+            {nt.email && <div style={{ fontSize:11, color:G.blue, marginTop:-6 }}>⚡ هيتعمل حساب Auth بالإيميل — المدرب يقدر يدخل بيه</div>}
+          </div>
+          <Btn onClick={addT} style={{ width:"100%",marginTop:8 }} disabled={addingTrainerAuth}>{addingTrainerAuth ? "⏳ جاري إنشاء Auth..." : "✅ إضافة المدرب"}</Btn>
+        </Modal>
+      )}
+      {changePwModal && (
+        <ChangePasswordModal user={user} onSave={saveMyPassword} onClose={() => setChangePwModal(false)} />
+      )}
+      {resetPwTarget && (
+        <ResetPasswordModal target={resetPwTarget} onSave={resetAnyPassword} onClose={() => setResetPwTarget(null)} />
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLIENT DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+function ClientDashboard({ data, user, onLogout }) {
+  const trainer = data.users.find(u => u.id === user.trainerId);
+  const freshUser = data.users.find(u => u.id === user.id) || user;
+  const sub = subStatus(freshUser);
+
+  if (sub.status === "expired") {
+    return <ExpiredScreen user={freshUser} trainer={trainer} onLogout={onLogout} />;
+  }
+
+  const file = data.clientFiles?.[user.id] || null;
+  const mySchedules = data.schedules.filter(s => s.trainerId === user.trainerId);
+
+  return (
+    <div style={{ minHeight:"100vh" }}>
+      <div style={{ background:G.card,borderBottom:`1px solid ${G.border}`,padding:"13px 22px",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+        <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+          <div style={{ fontSize:28 }}>🏋️</div>
+          <div>
+            <div style={{ fontWeight:900,color:G.red,fontSize:17,letterSpacing:2,lineHeight:1 }}>EI GHOL GYM</div>
+            <div style={{ fontSize:9,color:G.muted,letterSpacing:1 }}>مدرسة الغول</div>
+          </div>
+        </div>
+        <div style={{ display:"flex",alignItems:"center",gap:14 }}>
+          <div style={{ textAlign:"right",fontSize:13 }}>
+            <div style={{ fontWeight:700 }}>{user.name}</div>
+            <div style={{ color:G.muted,fontSize:11 }}>مدربك: {trainer?.name}</div>
+          </div>
+          <Btn onClick={onLogout} v="ghost" style={{ fontSize:11,padding:"6px 12px" }}>خروج</Btn>
+        </div>
+      </div>
+
+      <div style={{ maxWidth:760,margin:"0 auto",padding:"24px 16px" }}>
+        {sub.status === "warning" && (
+          <div style={{ background:G.orange+"18",border:`1.5px solid ${G.orange}77`,borderRadius:12,padding:"14px 18px",marginBottom:20 }}>
+            <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:10 }}>
+              <div style={{ fontSize:30,animation:"pulse 1.5s infinite" }}>🔔</div>
+              <div>
+                <div style={{ color:G.orange,fontWeight:900,fontSize:15 }}>اشتراكك هينتهي خلال {sub.label}!</div>
+                <div style={{ color:G.muted,fontSize:12,marginTop:3 }}>
+                  تاريخ الانتهاء: <strong style={{ color:G.orange }}>{freshUser.endDate}</strong>
+                </div>
+              </div>
+            </div>
+            <div style={{ background:G.orange+"25",border:`1px dashed ${G.orange}88`,borderRadius:9,padding:"10px 14px",display:"flex",alignItems:"center",gap:10 }}>
+              <div style={{ fontSize:22 }}>🎉</div>
+              <div>
+                <div style={{ color:G.orange,fontWeight:900,fontSize:13 }}>عرض خاص — خصم 10% لو جددت دلوقتي!</div>
+                <div style={{ color:G.muted,fontSize:12,marginTop:2 }}>تواصل مع مدربك لتجديد الاشتراك والاستفادة من الخصم قبل ما ينتهي.</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <Card style={{ marginBottom:20,display:"flex",gap:16,alignItems:"center" }}>
+          <div style={{ width:56,height:56,background:G.green+"1a",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26 }}>👤</div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontWeight:700,fontSize:17 }}>{user.name}</div>
+            <div style={{ display:"flex",gap:10,flexWrap:"wrap",marginTop:4 }}>
+              {user.goal   && <Badge color={G.gold}>{user.goal}</Badge>}
+              {user.weight && <Badge color={G.muted}>{user.weight} kg</Badge>}
+              {user.height && <Badge color={G.muted}>{user.height} cm</Badge>}
+              {user.age    && <Badge color={G.muted}>{user.age} سنة</Badge>}
+            </div>
+            {freshUser.endDate && (
+              <div style={{ marginTop:8,fontSize:12,color:G.muted }}>
+                الاشتراك حتى: <strong style={{ color:sub.color }}>{freshUser.endDate}</strong>
+                {sub.daysLeft !== null && <span style={{ color:sub.color,marginRight:6 }}>({sub.label} متبقي)</span>}
+              </div>
+            )}
+          </div>
+          <Badge color={sub.color}>{sub.status==="active"?"✓ نشط":sub.status==="warning"?"⚠️ قرب الانتهاء":"بدون اشتراك"}</Badge>
+        </Card>
+
+        {mySchedules.length > 0 && (
+          <div style={{ marginBottom:20 }}>
+            <h3 style={{ color:G.gold,marginBottom:10,fontSize:14 }}>📅 مواعيد الحصص</h3>
+            <div style={{ display:"flex",gap:10,overflowX:"auto",paddingBottom:4 }}>
+              {mySchedules.map(s => (
+                <div key={s.id} style={{ background:G.card,border:`1px solid ${G.border}`,borderRadius:10,padding:"10px 14px",flexShrink:0,borderTop:`3px solid ${TYPE_COLOR[s.type]||G.gold}` }}>
+                  <div style={{ fontWeight:700,fontSize:13,marginBottom:4 }}>{s.title}</div>
+                  <div style={{ color:G.muted,fontSize:11 }}>{s.day} • {s.time} • {s.duration}د</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <h3 style={{ color:G.gold,marginBottom:14,fontSize:16 }}>📁 ملفك الشخصي</h3>
+        <ClientFileView file={file} />
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ROOT
+// ══════════════════════════════════════════════════════════════════════════════
+function App() {
+  const [data, setRaw] = useState(null);
+  const [me, setMe]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [syncIndicator, setSyncIndicator] = useState(null); // "syncing" | "ok" | "err"
+  const pollRef = useRef(null);
+
+  const setData = useCallback(v => {
+    setRaw(prev => {
+      const next = typeof v === "function" ? v(prev) : v;
+      if (!prev) { return next; }
+
+      // مزامنة users مع Supabase
+      if (next.users !== prev.users) {
+        const added   = next.users.filter(u => !prev.users.find(p => p.id === u.id));
+        const updated = next.users.filter(u => {
+          const old = prev.users.find(p => p.id === u.id);
+          return old && JSON.stringify(old) !== JSON.stringify(u);
+        });
+        const deleted = prev.users.filter(u => !next.users.find(n => n.id === u.id));
+        [...added, ...updated].forEach(u => DB.upsertUser(u));
+        deleted.forEach(u => DB.deleteUser(u.id));
+      }
+
+      // مزامنة schedules مع Supabase
+      if (next.schedules !== prev.schedules) {
+        const added   = next.schedules.filter(s => !prev.schedules.find(p => p.id === s.id));
+        const updated = next.schedules.filter(s => {
+          const old = prev.schedules.find(p => p.id === s.id);
+          return old && JSON.stringify(old) !== JSON.stringify(s);
+        });
+        const deleted = prev.schedules.filter(s => !next.schedules.find(n => n.id === s.id));
+        [...added, ...updated].forEach(s => DB.upsertSchedule(s));
+        deleted.forEach(s => DB.deleteSchedule(s.id));
+      }
+
+      return next;
+    });
+  }, []);
+
+  // ── Real-time polling: full reload every 30s ─────────────────────────────
+  const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      setSyncIndicator("syncing");
+      try {
+        const fresh = await DB.loadAll();
+        if (fresh) {
+          setRaw(prev => {
+            // Only update if data actually changed to avoid re-renders
+            if (JSON.stringify(fresh.users) === JSON.stringify(prev?.users) &&
+                JSON.stringify(fresh.schedules) === JSON.stringify(prev?.schedules) &&
+                JSON.stringify(fresh.clientFiles) === JSON.stringify(prev?.clientFiles)) {
+              return prev;
+            }
+            // دايماً حافظ على بيانات الـ owner من الـ Seed
+            const seedOwner = SEED.users[0];
+            const mergedUsers = fresh.users.map(u => u.id === seedOwner.id ? { ...u, ...seedOwner } : u);
+            return { ...fresh, users: mergedUsers };
+          });
+          setSyncIndicator("ok");
+        } else { setSyncIndicator("err"); }
+      } catch { setSyncIndicator("err"); }
+      setTimeout(() => setSyncIndicator(null), 2000);
+    }, 30000); // every 30 seconds
+  }, []);
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const [dbStatus, setDbStatus] = useState("loading"); // "loading" | "connected" | "offline"
+
+  useEffect(() => {
+    (async () => {
+      // ── Restore Auth session ──────────────────────────────────────────────
+      const authSaved = AuthSession.load();
+      if (authSaved?.token) {
+        _authToken = authSaved.token;
+        _authRefreshToken = authSaved.refresh;
+        // تحقق من صلاحية الـ token
+        const authUser = await Auth.getUser();
+        if (!authUser) {
+          // حاول تجديد
+          const refreshed = await Auth.refresh();
+          if (!refreshed) {
+            _authToken = null;
+            AuthSession.clear();
+          }
+        }
+      }
+
+      const saved = await DB.loadAll();
+      if (saved) {
+        setDbStatus("connected");
+
+        if (saved.users.length === 0) {
+          // DB فاضي — ارفع كل الـ Seed
+          console.log("DB فاضي — رافع الـ Seed data...");
+          setRaw(SEED);
+          await Promise.all([
+            ...SEED.users.map(u => DB.upsertUser(u)),
+            ...SEED.schedules.map(s => DB.upsertSchedule(s)),
+          ]);
+        } else {
+          // DB فيه بيانات — حدّث الـ owner في الـ state والـ DB عشان الاسم والـ username يتغيروا
+          const seedOwner = SEED.users[0];
+          const mergedUsers = saved.users.map(u => u.id === seedOwner.id ? { ...u, ...seedOwner } : u);
+          setRaw({ ...saved, users: mergedUsers });
+          await DB.upsertUser(seedOwner);
+        }
+      } else {
+        setDbStatus("offline");
+        console.warn("Supabase مش متاح — شغال بالـ local seed");
+        setRaw(SEED);
+      }
+      // ── Restore legacy session ────────────────────────────────────────────
+      const savedId = Session.load();
+      // استخدم الـ state المحدّث (مع الـ owner الجديد) مش الـ saved القديم
+      const currentUsers = saved
+        ? (saved.users.length > 0
+            ? saved.users.map(u => u.id === SEED.users[0].id ? { ...u, ...SEED.users[0] } : u)
+            : SEED.users)
+        : SEED.users;
+      if (savedId && currentUsers) {
+        const found = currentUsers.find(u => u.id === savedId);
+        if (found) setMe(found);
+      }
+      setLoading(false);
+    })();
+    return () => stopPolling();
+  }, []);
+
+  // Start/stop polling based on login state
+  useEffect(() => {
+    if (me) { startPolling(); }
+    else    { stopPolling(); }
+  }, [!!me]);
+
+  useEffect(() => {
+    if (me && data) {
+      const fresh = data.users.find(u => u.id === me.id);
+      if (fresh && JSON.stringify(fresh) !== JSON.stringify(me)) {
+        setMe(fresh);
+      }
+    }
+  }, [data]);
+
+  const login  = u => { setMe(u); Session.save(u.id); };
+  const logout = () => { setMe(null); Session.clear(); AuthSession.clear(); Auth.signOut(); stopPolling(); };
+
+  if (loading) return (
+    <div style={{ display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:G.bg,gap:16 }}>
+      <div style={{ color:G.gold,fontWeight:900,fontSize:22,letterSpacing:4,animation:"pulse 1.5s infinite" }}>ELGHOL GYM</div>
+      <div style={{ color:G.muted,fontSize:13 }}>⟳ جاري التحميل وتحقق الاتصال بـ Supabase...</div>
+    </div>
+  );
+
+  const SyncPill = () => {
+    const showOffline = dbStatus === "offline" && !syncIndicator;
+    if (!syncIndicator && !showOffline) return null;
+    const cfg = syncIndicator ? {
+      syncing: { bg: G.blue+"22", color: G.blue, text: "⟳ مزامنة...", border: G.blue },
+      ok:      { bg: G.green+"22", color: G.green, text: "✓ محدّث",  border: G.green },
+      err:     { bg: G.red+"22",   color: G.red,   text: "⚠ خطأ في المزامنة", border: G.red },
+    }[syncIndicator] : { bg: G.orange+"22", color: G.orange, text: "📴 وضع بدون إنترنت", border: G.orange };
+    return (
+      <div style={{ position:"fixed",bottom:18,left:18,background:cfg.bg,border:`1px solid ${cfg.border}44`,color:cfg.color,borderRadius:20,padding:"6px 14px",fontSize:12,fontWeight:700,zIndex:9999,boxShadow:"0 2px 12px #0006" }}>
+        {cfg.text}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <style>{css}</style>
+      <SyncPill />
+      {!me                    && <Login data={data} onLogin={login} />}
+      {me?.role === "owner"   && <OwnerDashboard   data={data} setData={setData} user={me} onLogout={logout} />}
+      {me?.role === "trainer" && <TrainerDashboard data={data} setData={setData} user={me} onLogout={logout} />}
+      {me?.role === "client"  && <ClientDashboard  data={data}                  user={me} onLogout={logout} />}
+    </>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
